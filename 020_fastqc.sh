@@ -55,7 +55,7 @@ done
 # bollect matches (null-delimited for safety)
 readarray -d '' ALL_SAMPLES < <(find "${IN_DIR}" -type f \( -false "${args[@]}" \) -print0 | sort -z)
 
-# Ggard against empty list or bad array index (prevents GUI fallback)
+# guard against empty list or bad array index (prevents GUI fallback)
 if (( ${#ALL_SAMPLES[@]} == 0 )); then
   echo "ERROR: No FASTQ files matched under ${IN_DIR} using IDs from ${SAMPLE_SHEET}" >&2
   exit 2
