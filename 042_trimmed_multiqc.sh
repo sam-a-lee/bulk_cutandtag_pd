@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=1 # could specify more here if wanted 
 #SBATCH --mem=4G # shouldnt require more than 2 gb for all files ss
 #SBATCH --job-name=multiqc
-#SBATCH --output=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/logs/multiqc_%j.out
-#SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/logs/multiqc_%j.err
+#SBATCH --output=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc/logs/multiqc_%j.out
+#SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc/logs/multiqc_%j.err
 
 #---------#
 # purpose #
@@ -29,8 +29,8 @@ source ~/.bashrc
 # activate conda env
 module load py-multiqc/1.15-gcc-13.2.0-python-3.11.6
 
-OUT_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
-IN_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
+OUT_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc"
+IN_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc"
 
 #---------------------------------#
 # run multiqc in fastqc directory #
