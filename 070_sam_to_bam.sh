@@ -11,7 +11,9 @@
 #SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/07_bam/logs/sam_to_bam_%A_%a.err
 #SBATCH --array=0-27 # !!! change this as needed
 
-##### PURPOSE #####
+#---------# 
+# purpose #
+#---------#
 
 # this script converts .sam files to .bam files
 # only mapped reads are retained in the output .bam files

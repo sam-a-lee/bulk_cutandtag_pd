@@ -10,7 +10,9 @@
 #SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/08_bed/logs/bam_to_bed_%A_%a.err
 #SBATCH --array=0-27 # change as needed
 
-##### PURPOSE #####
+#---------# 
+# purpose #
+#---------#
 
 # this script converts .bam files to .bed files
 # after conversion, paired reads are filtered for those on the same chromosome and those that are less than 1000 bp

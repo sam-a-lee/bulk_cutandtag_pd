@@ -14,7 +14,9 @@
 # garbage collection can parallelize - up to 4 threads for max returns
 # total threads requested = 5 (1 sort + 4 gc)
 
-##### PURPOSE #####
+#---------# 
+# purpose #
+#---------#
 
 # this script takes trimmed sequences in .sam format, sorts them and then either
 # marks duplicate reads without moving them

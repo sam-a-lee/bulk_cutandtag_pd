@@ -7,9 +7,9 @@
 #SBATCH --mem=1G # shouldnt require more than a gb per file
 #SBATCH --hint=nomultithread # prefer physical cores for better throughput
 #SBATCH --job-name=fastqc
-#SBATCH --array=0-111 # modify based on number of files
-#SBATCH --output=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.err
+#SBATCH --array=0-115 # modify based on number of files
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.err
 
 #---------#
 # purpose #
@@ -27,46 +27,24 @@ cd /users/k2587336
 # load shell
 source ~/.bashrc
 
-# activate conda env
+# load fastq module
 module load fastqc/0.12.1-gcc-13.2.0
 
-# input directory of fastq files
-IN_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/bulkCutandTag_PD/AACNGMFHV"
-
 # output directory for fastqc files
-OUT_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/02_fastqc"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc"
 
 # sample sheet with sample IDs corresponding to each sample and cell type
-SAMPLE_SHEET="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"
+SAMPLE_SHEET="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"
 
 #----------------------------------------#
 # get list of files for fastqc and array #
 #----------------------------------------#
 
-# read first column (tab-delimited) as SAMPLE_IDs 
-SAMPLE_ID=($(awk -F'\t' 'NF && $1!~/^#/{print $1}' "$SAMPLE_SHEET"))
-
-# build -name patterns safely (no literal quotes), then find & sort
-args=()
-for id in "${SAMPLE_ID[@]}"; do
-  args+=(-o -name "*${id}_S[0-9]*_L00[12]_R[12]_001.fastq.gz")
-done
-
-# bollect matches (null-delimited for safety)
-readarray -d '' ALL_SAMPLES < <(find "${IN_DIR}" -type f \( -false "${args[@]}" \) -print0 | sort -z)
-
-# guard against empty list or bad array index (prevents GUI fallback)
-if (( ${#ALL_SAMPLES[@]} == 0 )); then
-  echo "ERROR: No FASTQ files matched under ${IN_DIR} using IDs from ${SAMPLE_SHEET}" >&2
-  exit 2
-fi
-if (( SLURM_ARRAY_TASK_ID < 0 || SLURM_ARRAY_TASK_ID >= ${#ALL_SAMPLES[@]} )); then
-  echo "ERROR: SLURM_ARRAY_TASK_ID=${SLURM_ARRAY_TASK_ID} out of range (0..$(( ${#ALL_SAMPLES[@]} - 1 )))" >&2
-  exit 3
-fi
+# put r1 and r2 files into array all_files
+mapfile -t ALL_FILES < <(awk -F'\t' 'NF && $1!~/^#/{ if($4!="")print $4; if($5!="")print $5 }' "$SAMPLE_SHEET")
 
 # specify sample based on array number 
-SAMPLE=${ALL_SAMPLES[$SLURM_ARRAY_TASK_ID]}
+SAMPLE=${ALL_FILES[$SLURM_ARRAY_TASK_ID]}
 
 #---------------------------#
 # fastqc on raw fastq files #
