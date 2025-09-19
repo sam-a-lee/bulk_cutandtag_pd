@@ -1,4 +1,4 @@
-#!/bin/bash 
+#!/bin/bash -l
 #SBATCH --time=48:00:00 # cpu partition max time
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
@@ -7,9 +7,9 @@
 #SBATCH --mem=16G
 #SBATCH --hint=nomultithread 
 #SBATCH --job-name=seq_align
-#SBATCH --array=0-30 # adjust based on number of samples
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_aligned/seq_align_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_aligned/seq_align_%A_%a.err
+#SBATCH --array=0-29 # adjust based on number of samples
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned/logs/seq_align_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned/logs/seq_align_%A_%a.err
 
 #---------# 
 # purpose #
@@ -28,7 +28,11 @@ cd /users/k2587336
 source ~/.bashrc
 
 # activate conda env
-source activate bowtie2
+#source activate bowtie2
+source activate bwa-mem2
+
+# load samtools
+module load samtools 
 
 # directory where trimmed files are located
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
@@ -37,7 +41,7 @@ IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimme
 OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned"
 
 # directory where reference genome (hg19) is
-REF="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/grch38_primary_assembly_index"
+REF="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
 
 # memory samtools to use for sorting 
 SAMTOOLS_SORT_MEM="1G" 
@@ -47,36 +51,44 @@ SAMTOOLS_SORT_MEM="1G"
 #---------------------------------------------------#
 
 # get sorted list of unique trimmed R1 fastqs (sorted for consistency)
-SAMPLES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_R1_001_val_1.fq.gz" | sort))
+SAMPLES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_R1_001_cutadapt.fastq.gz" | sort))
 
 # pick sample for this array index
 R1=${SAMPLES[$SLURM_ARRAY_TASK_ID]}
-R2="${R1/_R1_001_val_1.fq.gz/_R2_001_val_2.fq.gz}"
+R2="${R1/_R1_001_cutadapt.fastq.gz/_R2_001_cutadapt.fastq.gz}"
 
 # extract clean sample name (strip suffixes)
-SAMPLE=$(basename "$R1" | sed -E 's/_R[12]_001_val_[12]\.fq\.gz$//')
+SAMPLE=$(basename "$R1" | sed -E 's/_R[12]_001_cutadapt\.fastq\.gz$//')
 
 #-----------------------------------#
 # align samples to ref with bowtie2 #
 #-----------------------------------#
 
-echo "Processing sample: ${sample}"
+echo "Processing sample: ${SAMPLE}"
+
+bwa-mem2 mem -t 8 \
+  "${REF}" \
+  "${R1}" \
+  "${R2}" \
+  > "${OUT_DIR}/${SAMPLE}_bwamem2.sam"
+
+echo "Done: ${SAMPLE}"
 
 # run bowtie2
-bowtie2 --local \
-    --very-sensitive \
-    --no-mixed \
-    --no-discordant \
-    --dovetail \
-    --phred33 \
-    -I 10 \
-    -X 700 \
-    -p 8 \
-    -x ${REF} \
-    -1 ${R1} \
-    -2 ${R2} \
-    -S ${OUT_DIR}/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord.sam \
-    &> ${OUT_DIR}/logs/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord_summary.txt
+#bowtie2 --local \
+##    --very-sensitive \
+ #   --no-mixed \
+ #   --no-discordant \
+ #   --dovetail \
+ #   --phred33 \
+ #   -I 10 \
+ #   -X 700 \
+ #   -p 8 \
+ #   -x ${REF} \
+ #   -1 ${R1} \
+ #   -2 ${R2} \
+ #   -S ${OUT_DIR}/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord.sam \
+ #   &> ${OUT_DIR}/logs/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord_summary.txt
 
 # local = local alignment
 # very sensitivte =  -D 20 -R 3 -N 0 -L 20 -i S,1,0.50 

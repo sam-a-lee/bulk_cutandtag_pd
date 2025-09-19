@@ -29,8 +29,8 @@ source ~/.bashrc
 # load multiqc module 
 module load py-multiqc/1.15-gcc-13.2.0-python-3.11.6
 
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc"
 
 #---------------------------------#
 # run multiqc in fastqc directory #
@@ -39,6 +39,5 @@ IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimme
 multiqc \
     --outdir ${OUT_DIR} \
     --verbose \
-    y
     ${IN_DIR}
 

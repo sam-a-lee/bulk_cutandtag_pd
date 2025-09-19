@@ -7,9 +7,9 @@
 #SBATCH --mem=1G # shouldnt require more than a gb per file
 #SBATCH --hint=nomultithread # prefer physical cores for better throughput
 #SBATCH --job-name=fastqc
-#SBATCH --array=0-29 # modify based on number of files
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/fastqc_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/fastqc_%A_%a.err
+#SBATCH --array=0-59 # modify based on number of files
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/logs/fastqc_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/logs/fastqc_%A_%a.err
 
 #---------#
 # purpose #
@@ -27,23 +27,24 @@ cd /users/k2587336
 # load shell
 source ~/.bashrc
 
-# activate conda env
+# load fastq module
 module load fastqc/0.12.1-gcc-13.2.0
 
-# input directory of fastq files
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed"
+# input dir of files
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
 
 # output directory for fastqc files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/fastqc"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/fastqc"
 
 #----------------------------------------#
 # get list of files for fastqc and array #
 #----------------------------------------#
 
-SAMPLES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_dup_rm.sam"))
+# put r1 and r2 files into array all_files
+readarray -t ALL_FILES < <(find "$IN_DIR" -maxdepth 1 -type f -name '*.fastq.gz' | sort)
 
 # specify sample based on array number 
-SAMPLE=${SAMPLES[$SLURM_ARRAY_TASK_ID]}
+SAMPLE=${ALL_FILES[$SLURM_ARRAY_TASK_ID]}
 
 #---------------------------#
 # fastqc on raw fastq files #

@@ -29,13 +29,15 @@ cd /users/k2587336
 source ~/.bashrc
 
 # activate bowtie2 conda env
-source activate bowtie2
-
+# source activate bowtie2
+source activate bwa-mem2
 
 #-------------# 
 # build index #
 #-------------#
 
-bowtie2-build --threads 8 \
-    /scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa \
-    /scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/grch38_primary_assembly_index \
+#bowtie2-build --threads 8 \
+#    /scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa \
+#   /scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/grch38_primary_assembly_index \
+
+bwa-mem2 index /scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa

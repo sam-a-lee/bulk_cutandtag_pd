@@ -6,9 +6,9 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=16G
 #SBATCH --job-name=rm_dups
-#SBATCH --output=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/remove_dups_%j.out
-#SBATCH --error=/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/remove_dups_%j.err
-#SBATCH --array=0-27 # !!! change to correct number
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/remove_dups_%j.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/logs/remove_dups_%j.err
+#SBATCH --array=0-29 # !!! change to correct number
 
 # NB: picard is single threaded
 # garbage collection can parallelize - up to 4 threads for max returns
@@ -40,13 +40,13 @@ source ~/.bashrc
 source activate picard
 
 # directory containing input files (trimmed + sorted sam files )
-IN_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/05_aligned"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned"
 
 # directory to store output files in
-OUT_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed"
 
 # temporary directory
-TEMP_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/temp"
+TEMP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/06_duplicates_removed/temp"
 
 
 #---------------------------------------------#
@@ -55,7 +55,7 @@ TEMP_DIR="/scratch/prj/bcn_pd_pesticides/Files-From-Imperial/analysis_cutandtag_
 
 # get list of unique trimmed + aligned samples
 # NB: files names must be explicit or this will become infinite loop
-SAMPLES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_bowtie2_local_vsensitive_nomixed_nodiscord.sam"))
+SAMPLES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_bwamem2.sam"))
 
 # select the sample for this array task
 SAMPLE="${SAMPLES[$SLURM_ARRAY_TASK_ID]}"
@@ -73,23 +73,35 @@ export _JAVA_OPTIONS="-Xmx12G -XX:ParallelGCThreads=1 -XX:GCTimeLimit=50"
 #-----------------------------------------#
 
 # sort by coordinate
-picard SortSam \
-    I=$SAMPLE \
-    O=${OUT_DIR}/${SAMPLE_NAME}_picard_sorted.sam \
-    SORT_ORDER=coordinate \
-    TMP_DIR=$TEMP_DIR
+
 
 # mark duplicates (don't remove)
-picard MarkDuplicates \
-    I=${OUT_DIR}/${SAMPLE_NAME}_picard_sorted.sam \
-    O=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_marked.sam \
-    TMP_DIR=$TEMP_DIR \
-    METRICS_FILE=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_marked_summary.txt 
+# picard MarkDuplicates \
+#    I=${OUT_DIR}/${SAMPLE_NAME}_picard_sorted.sam \
+#    O=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_marked.sam \
+#    TMP_DIR=$TEMP_DIR \
+#    METRICS_FILE=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_marked_summary.txt 
+
+
+TMP_SORTED="$(mktemp -p "$TMP_DIR" "${SAMPLE_NAME}_picard_sorted.XXXXXX.sam")"
+
+cleanup() {
+  rm -f "$TMP_SORTED"
+}
+
+# clean temp files on exit (success or failure)
+trap cleanup EXIT INT TERM
+
+picard SortSam \
+    I=$SAMPLE \
+    O=${TMP_SORTED} \
+    SORT_ORDER=coordinate \
+    TMP_DIR=$TEMP_DIR 
 
 # remove duplicates
 picard MarkDuplicates \
-    I=${OUT_DIR}/${SAMPLE_NAME}_picard_sorted.sam \
-    O=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_removed.sam \
+    I=${TMP_SORTED} \
+    O=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_rm.sam \
     TMP_DIR=$TEMP_DIR \
-    METRICS_FILE=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_removed_summary.txt \
+    METRICS_FILE=${OUT_DIR}/${SAMPLE_NAME}_picard_dup_rm_summary.txt \
     REMOVE_DUPLICATES=true
