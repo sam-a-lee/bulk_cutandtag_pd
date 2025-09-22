@@ -69,7 +69,7 @@ samtools sort -n -@ 4 -O SAM "${SAMPLE}" -o "${OUT_DIR}/${SAMPLE_NAME}_namesorte
 # -F 2048 drop supplementary alignments
 # -q 30 keep only reads with mapq > 30 (done on bedpe)
 # -F 12 drop unmapped read (0x4) and unmapped mate (0x8) - both mates mapped
-samtools view -@ 4 -h -f 2 -F 12 -F 256 -F 2048  \
+samtools view -@ 4 -h -f 2 -F 12 -F 256 -F 2048 \
   "${OUT_DIR}/${SAMPLE_NAME}_namesorted.sam" \
   -o "${OUT_DIR}/${SAMPLE_NAME}_filtered.sam"
 
