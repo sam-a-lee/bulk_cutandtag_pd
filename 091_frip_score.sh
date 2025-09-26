@@ -5,9 +5,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1 
 #SBATCH --mem=4G
-#SBATCH --job-name=macs2_h3k27ac
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/macs2_h3k27ac_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/macs2_h3k27ac_%A_%a.err
+#SBATCH --job-name=frip_score
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/frip_score_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/frip_score_%A_%a.err
 #SBATCH --array=0-29 # !!! ADJUST ME AS NEEDED BASED ON FILE NUMBER !!! 
 
 #--------------------#
@@ -18,23 +18,23 @@
 cd /users/k2587336
 
 # load shell
-source ~/.bashrc
+load module miniforge3
 
 # load macs conda env 
-source activate macs3
+mamba activate deeptools
 
 # dir with input bed files
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks"
 
 # out dir for peak calling files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/frip_scores"
 
 #--------------------------------#
 # create array of BAMPE files #
 #---------------------------------#
 
 # get list of bam files of fragments without duplicates
-BAMPE_FILES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_filtered_namesorted.bam" | sort))
+BAM_FILES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_filtered_namesorted.bam" | sort))
 
 # get sample based on sample list and array indexs
 FILE="${BAMPE_FILES[$SLURM_ARRAY_TASK_ID]}"

@@ -35,7 +35,6 @@ CHROM_SIZE="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_
 #------------------------------------#
 # create array for list of bed files #
 #------------------------------------#
-
 # get list of bam files of fragments without duplicates
 FRAG_FILES=($(find "${IN_DIR}" -maxdepth 1 -type f -name "*_fragments_sorted.bed" | sort))
 

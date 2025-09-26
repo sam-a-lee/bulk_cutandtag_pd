@@ -14,8 +14,7 @@
 # purpose #
 #---------#
 
-# this file uses trimgalore to quality trim and remove illumina adaptors from raw sequencing reads (fastq files)
-# trim galore produces read QC reports after trimming 
+# this file uses cutadapt to quality trim and remove illumina adaptors from raw sequencing reads (fastq files)
 
 #--------------------# 
 # set up environment #
@@ -34,8 +33,9 @@ module load py-cutadapt/4.4-gcc-13.2.0-python-3.11.6
 ROOT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/03_merged_fastq"
 
 # directory to save files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/test"
 
+mkdir -p $OUT_DIR
 #---------------------------------------------------# 
 # create list of files corresponding to each sample #
 #---------------------------------------------------#
@@ -68,7 +68,7 @@ echo "Processing sample: ${R1} and ${R2}"
 # min lenght of 30 bp
 # specification of illumina primers per nebnext protocol
 # https://www.neb.com/en-gb/-/media/nebus/files/manuals/manuale7103-e7645.pdf?rev=de09eaf8fcdf45e0ac8a66bf6fee75fb&hash=80FA51FEF16A47E60A9C0A09B1F745E2
-# specify Tn5 ME anchored at end 
+# specify Tn5 ME anchored at end (see 2022 protocol.io paper )
 # only keep reads of 30bp or more to be consistent with cell ranger
 # https://kb.10xgenomics.com/hc/en-us/articles/360028141971-Can-I-change-the-sequencing-read-length-of-R1N-and-R2N#:~:text=Note%20that%20Cell%20Ranger%20ATAC,the%20software%20run%20to%20fail.
 # max length of 50 since 4 samples seq with 75 bp instead of 50 bp and read length can affect peak identificaiton 
@@ -80,7 +80,9 @@ cutadapt -m 30 -l 50 -n 2 \
   -o "${OUT_DIR}/${BASE}_R1_001_cutadapt.fastq.gz" \
   -p "${OUT_DIR}/${BASE}_R2_001_cutadapt.fastq.gz" \
   ${R1} ${R2}
-
-
-# -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCA  \
+  
+# Illumina universal adapters (read-through on short inserts)
+ # -g ^CTGTCTCTTATACACATCT \
+ #   -G ^CTGTCTCTTATACACATCT \
+# -a AGATCGGAAGAGCACACGTCTGAACTCCAGTCAC \
 # -A AGATCGGAAGAGCGTCGTGTAGGGAAAGAGTGT \

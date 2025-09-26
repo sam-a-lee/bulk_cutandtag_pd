@@ -7,7 +7,7 @@
 #SBATCH --mem=1G # shouldnt require more than a gb per file
 #SBATCH --hint=nomultithread # prefer physical cores for better throughput
 #SBATCH --job-name=fastqc
-#SBATCH --array=0-115 # modify based on number of files
+#SBATCH --array=1-48 # modify based on number of files
 #SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.out
 #SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.err
 

@@ -3,7 +3,7 @@
 #SBATCH --partition=cpu
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=4G
 #SBATCH --hint=nomultithread
 #SBATCH --job-name=fragments
@@ -53,43 +53,55 @@ echo "[INFO] SAMPLE_NAME=${SAMPLE_NAME}"
 #------------------#
 
 # keep properly paired, both mapped, drop secondary/supp/dup/QC-fail, MAPQ ≥30
-samtools view -b -f 0x2 -F 3852 -q 30 -o "${OUT_DIR}/${SAMPLE_NAME}_hq.bam" "${SAMPLE}"
+samtools view -h -f 0x2 -F 3852 "${SAMPLE}" \
+| awk 'BEGIN{OFS="\t"}
+  /^@/ { print; next }                           # pass headers
+  function is_mito(c,   lc){ lc=tolower(c); return (lc=="chrm" || lc=="mt" || lc=="m") }
+  {
+    # buffer pairs by qname (name-sorted, primary only → 2 lines per qname)
+    if ($1 != qn) {
+      qn = $1; l1 = $0; split($0,f,"\t")
+      r1chr=f[3]; r1mapq=f[5]+0; r1tlen=f[9]+0
+      have1=1; next
+    } else {
+      l2 = $0; split($0,g,"\t")
+      r2chr=g[3]; r2mapq=g[5]+0
+
+      abs_tlen = (r1tlen<0)? -r1tlen : r1tlen
+      pass = (r1mapq>=30 && r2mapq>=30) \
+             && (!is_mito(r1chr) && !is_mito(r2chr)) \
+             && (r1chr == r2chr) \
+             && (abs_tlen <= 1000)
+
+      if (pass) { print l1; print l2 }
+      have1=0
+    }
+  }' \
+| samtools view -b -o "${OUT_DIR}/${SAMPLE_NAME}_hq.bam" -
+
+# re sort by name before bedpe converstion
 samtools sort -n -o "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bam" "${OUT_DIR}/${SAMPLE_NAME}_hq.bam"
 
 # to BEDPE (name-sorted input)
 bedtools bamtobed -bedpe -i "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bam" > "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bed"
 
-#-----------------#
-# filter BED file #
-#-----------------#
-
-awk '($1==$4) && ($1!="chrM" && $1!="MT") {
-  start = ($2 < $5 ? $2 : $5);
-  end   = ($3 > $6 ? $3 : $6);
-  if ((end - start) < 1000) print
-}' "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bed" > "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted_clean.bed"
-
 #----------------------------#
 # extract and sort fragments #
 #----------------------------#
 
-cut -f1,2,6 "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted_clean.bed" > "${OUT_DIR}/${SAMPLE_NAME}_fragments.bed"
+cut -f1,2,6 "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bed" > "${OUT_DIR}/${SAMPLE_NAME}_fragments.bed"
 sort -k1,1 -k2,2n -k3,3n "${OUT_DIR}/${SAMPLE_NAME}_fragments.bed" > "${OUT_DIR}/${SAMPLE_NAME}_fragments_sorted.bed"
 
-#---------------------------------------------#
-# extract fragment lengths to sam TLEN format #
-#---------------------------------------------#
+#----------------------------------------#
+# extract fragment lengths from bam file #
+#----------------------------------------#
 
 # get fragment lengths from bedpe
-# to sam file TLEN (col 9) format
-awk 'BEGIN{OFS="\t"}
-     /^#/ {next}
-     { s = ($2 < $5 ? $2 : $5);   
-       e = ($3 > $6 ? $3 : $6);   
-       L = e - s;             
-       if (L > 0) print L
-     }' "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted_clean.bed" \
-  | sort -n \
-  | uniq -c \
-  | awk -v OFS="\t" '{print $2,$1}' \
-  > "${OUT_DIR}/${SAMPLE_NAME}_fragment_lengths.txt"
+samtools view \ 
+    -f 0x42 \ # require proper pair AND read1 to about double counting
+    "${OUT_DIR}/${SAMPLE_NAME}_hq_namesorted.bam" \ 
+    | awk 'BEGIN{OFS="\t"} { L = $9; if (L<0) L = -L; if (L>0) print L }' \ 
+    | sort -n \ 
+    | uniq -c \ 
+    | awk -v OFS="\t" '{print $2,$1}' \ 
+    > "${OUT_DIR}/${SAMPLE_NAME}_fragment_lengths.txt"
