@@ -6,10 +6,10 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 #SBATCH --hint=nomultithread
-#SBATCH --job-name=fragments
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_fragments/logs/fragments_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_fragments/logs/fragments_%A_%a.err
-#SBATCH --array=0-29   # update or see dynamic sizing note below
+#SBATCH --job-name=fragment_lengths
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads/logs/fragment_lengths_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads/logs/fragment_lengths_%A_%a.err
+#SBATCH --array=1-30   # update or see dynamic sizing note below
 
 set -euo pipefail
 
@@ -22,10 +22,9 @@ source ~/.bashrc
 
 module load samtools
 
-
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
 
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_fragments"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads/fragment_lengths"
 
 #-----------------#
 # build file list #
