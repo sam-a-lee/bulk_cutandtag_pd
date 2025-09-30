@@ -5,29 +5,33 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1 
 #SBATCH --mem=4G
-#SBATCH --job-name=macs2_h3k27ac
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/macs2_h3k27ac_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks/logs/macs2_h3k27ac_%A_%a.err
+#SBATCH --job-name=macs3_h3k27ac
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/macs3_h3k27ac_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/macs3_h3k27ac_%A_%a.err
 #SBATCH --array=0-29 # !!! ADJUST ME AS NEEDED BASED ON FILE NUMBER !!! 
 
 #--------------------#
 # set up environment #
 #--------------------#
+# initiate conda
 
-# change dir to where conda envs are 
-cd /users/k2587336
-
-# load shell
-source ~/.bashrc
+CONDA_ROOT="/software/spackages_v0_21_prod/apps/linux-ubuntu22.04-zen2/gcc-13.2.0/anaconda3-2022.10-5wy43yh5crcsmws4afls5thwoskzarhe"
+if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+  . "${CONDA_ROOT}/etc/profile.d/conda.sh"
+else
+  export PATH="${CONDA_ROOT}/bin:$PATH"
+  eval "$(${CONDA_ROOT}/bin/conda shell.bash hook)"
+fi
 
 # load macs conda env 
-source activate macs3
+conda activate macs3
 
 # dir with input bed files
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
 
 # out dir for peak calling files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/09_peaks"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/raw_peaks"
+
 
 #--------------------------------#
 # create array of BAMPE files #
@@ -61,4 +65,4 @@ macs3 callpeak \
     --nolambda \
     --nomodel \
     --outdir ${OUT_DIR} \
-    -n ${SAMPLE_NAME}_macs2_q_0_00001_h3k27ac
+    -n ${SAMPLE_NAME}_macs3_q_0_00001_h3k27ac

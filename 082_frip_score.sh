@@ -31,7 +31,7 @@ IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filter
 FRIP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/frip_scores"
 
 # peak dir
-PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks"
+PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/clean_peaks"
 
 # assaign to array
 mapfile -t BAM_FILES < <(find "${IN_DIR}" -maxdepth 1 -type f -name "*_filtered_namesorted.bam" | sort)
@@ -65,8 +65,8 @@ conda activate deeptools
 
 plotEnrichment \
   -b "${IN_DIR}/${SAMPLE_NAME}_filtered_coordsorted.bam" \
-  --BED "${PEAK_DIR}/${SAMPLE_NAME}_macs2_q_0_00001_h3k27ac_peaks.narrowPeak" \
+  --BED "${PEAK_DIR}/${SAMPLE_NAME}_macs3_q_0_00001_h3k27ac_peaks_clean.narrowPeak" \
   -o "${FRIP_DIR}/${SAMPLE_NAME}_sample_enrichment.pdf" \
   --labels "${SAMPLE_NAME}" \
-  --blackListFileName "/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/nordin_hg38_problematic.bed" \
+  --blackListFileName "/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/nordin_hg38_problematic_clean.bed" \
   --outRawCounts "${FRIP_DIR}/${SAMPLE_NAME}_frip_score.txt"
