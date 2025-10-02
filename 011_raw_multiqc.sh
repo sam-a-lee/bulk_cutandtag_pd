@@ -6,38 +6,30 @@
 #SBATCH --cpus-per-task=1 # could specify more here if wanted 
 #SBATCH --mem=4G # shouldnt require more than 2 gb for all files ss
 #SBATCH --job-name=multiqc
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/test/multiqc_%j.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulkdata_out/04_trimmed/test/multiqc_%j.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_fastqc/logs/011_multiqc_%j.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_fastqc/logs/011_multiqc_%j.err
 
 #---------#
 # purpose #
 #---------#
 
 # this files creates a summary of all fastqc files to make qc easier and faster
-# summarizing fastqc files after trimming
 
 #--------------------#
 # set up environment #
 #--------------------#
 
-# change dir to where conda envs are 
-cd /users/k2587336
-
-# load shell
-source ~/.bashrc
-
-# load multiqc module 
+# activate conda env
 module load py-multiqc/1.15-gcc-13.2.0-python-3.11.6
 
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/test"
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed/test"
+DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc"
 
 #---------------------------------#
 # run multiqc in fastqc directory #
 #---------------------------------#
 
 multiqc \
-    --outdir ${OUT_DIR} \
+    --outdir ${DIR} \
     --verbose \
-    ${IN_DIR}
+    ${DIR}
 

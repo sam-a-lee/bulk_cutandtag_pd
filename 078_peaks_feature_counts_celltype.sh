@@ -5,9 +5,9 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
-#SBATCH --job-name=feature_counts
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/counts_%j.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/counts_%j.err
+#SBATCH --job-name=feature_counts_celltype
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/078_feature_counts_celltype_%j.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/078_feature_counts_celltype__%j.err
 
 #-------------#
 # Environment #
@@ -22,7 +22,7 @@ else
 fi
 
 # load samtools module
-module load samtools
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
 # activate custom bedtools env
 conda activate bedtools
@@ -31,16 +31,16 @@ conda activate bedtools
 SAMPLE_SHEET="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"
 
 # bam files to read in 
-BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
+BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
 
 # dir with cell type specific consensus peaks
-CONSENSUS_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/consensus_peaks"
+CONSENSUS_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/074_peaks_consensus_celltype/076_peaks_consensus_celltype_blacklist_removed"
 
 # out dir
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/cell_type_feature_counts"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/078_peaks_feature_counts_celltype"
 
 # tmp dir for processing
-TMP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/tmp_counts_$$"
+TMP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/078_peaks_feature_counts_celltype/tmp_counts_$$"
 
 mkdir -p "${OUT_DIR}" "${TMP_DIR}"
 
@@ -83,7 +83,7 @@ for ct in "${CELLTYPES[@]}"; do
   echo "[INFO $(ts)] === Cell type: ${ct} ==="
 
   # consensus peaks (assumes MACS3 narrowPeak filename pattern)
-  PEAK_BED="$(ls "${CONSENSUS_DIR}/consensus_${ct}_macs2_q_0_00001_peaks_clean.narrowPeak" 2>/dev/null | head -n1 || true)"
+  PEAK_BED="$(ls "${CONSENSUS_DIR}/consensus_${ct}_macs3_q_0_00001_peaks_clean.narrowPeak" 2>/dev/null | head -n1 || true)"
   if [ -z "${PEAK_BED}" ]; then
     echo "[WARN $(ts)] No consensus peaks for ${ct}; skipping."
     continue

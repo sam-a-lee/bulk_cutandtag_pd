@@ -5,13 +5,10 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=8G
-#SBATCH --job-name=feature_counts_allconsensus
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/counts_allconsensus_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/counts_allconsensus_%A_%a.err
+#SBATCH --job-name=feature_counts_all
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/077_feature_counts_all_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/077_feature_counts_all_%A_%a.err
 #SBATCH --array=0-29
-
-set -euo pipefail
-
 #-------------#
 # Environment #
 #-------------#
@@ -24,20 +21,20 @@ else
   eval "$(${CONDA_ROOT}/bin/conda shell.bash hook)"
 fi
 
-# load samtools moduke
-module load samtools
+# load module 
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
 # load custom bedtools env
 conda activate bedtools
 
 # dir with filtered bam files
-BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
+BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
 
 # dir with consensus bam file and peaks
-CONSENSUS_PEAKS="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/consensus_peaks/consensus_all_samples_macs2_q_0_00001_macs3_peaks_clean.narrowPeak"
+CONSENSUS_PEAKS="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/073_peaks_consensus_all/075_peaks_consensus_all_blacklist_removed/consensus_macs3_q_0_00001_peaks_clean.narrowPeak"
 
 # out dir for samples vs consensus
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/feature_counts_allconsensus"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/077_peaks_feature_count_all"
 
 mkdir -p "${OUT_DIR}"
 
@@ -71,4 +68,4 @@ BAM_CS="${BAM_DIR}/${SAMPLE_NAME}_filtered_coordsorted.bam"
 [[ -s "$BAM_CS" ]] || samtools sort -@ "$CPUS" -o "$BAM_CS" "$BAM_IN"
 
 # Count vs ALL-consensus peaks
-bedtools multicov -bams "${BAM_CS}" -bed "${CONSENSUS_PEAKS}" > "${OUT_DIR}/${SAMPLE_NAME}_all_consensus_multicov.tsv"
+bedtools multicov -bams "${BAM_CS}" -bed "${CONSENSUS_PEAKS}" > "${OUT_DIR}/${SAMPLE_NAME}_feature_counts_all_multicov.tsv"

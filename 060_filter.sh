@@ -7,9 +7,9 @@
 #SBATCH --mem=4G
 #SBATCH --hint=nomultithread 
 #SBATCH --job-name=filter_reads
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads/logs/filter_reads_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads/logs/filter_reads_%A_%a.err
-#SBATCH --array=0-30 # !!! change this as needed
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered/logs/060_filter_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered/logs/060_filter_%A_%a.err
+#SBATCH --array=0-29 # !!! change this as needed
 
 #---------# 
 # purpose #
@@ -22,33 +22,27 @@
 # set up environment #
 #--------------------#
 
-# change dir to where conda envs are 
-cd /users/k2587336
+# load samtools module
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
-# load shell
-source ~/.bashrc
-
-# load samtools module (v1.17-gcc-13.2.0-python-3.11.6_ 
-# libncurse 5.0 req by conda samtools by 6.5 installed
-module load samtools 
-
-source activate bedtools 
-
-# root working directory
-ROOT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out"
+# load bedtools module 
+module load bedtools2/2.31.0-gcc-12.3.0-python-3.11.6
 
 # directory of input files
-IN_DIR="${ROOT_DIR}/06_duplicates_removed"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/050_deduplicated"
 
 #out dir
-OUT_DIR="${ROOT_DIR}/07_filtered_reads"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
+
+mkdir -p ${OUT_DIR}
+mkdir -p "${OUT_DIR}/logs"
 
 #----------------------------#
 # array list and file naming #
 #----------------------------#
 
 # get list of samples without duplicates
-mapfile -t SAMPLES_IN < <(find "$IN_DIR" -maxdepth 1 -type f -name "*_picard_dup_rm.sam" | sort)
+mapfile -t SAMPLES_IN < <(find "$IN_DIR" -maxdepth 1 -type f -name "*_picard_dedup.sam" | sort)
 
 # get sample from samples list based on array index
 SAMPLE="${SAMPLES_IN[$SLURM_ARRAY_TASK_ID]}"
@@ -60,12 +54,8 @@ SAMPLE_NAME=$(basename "$SAMPLE" | cut -d'_' -f1)
 # filter and convert to bam #
 #---------------------------#
 
-#  name sort reads
+# name sort reads
 samtools sort -n -@ 4 -O SAM "${SAMPLE}" -o "${OUT_DIR}/${SAMPLE_NAME}_namesorted.sam"
-
-#samtools view -@ 4 -h -f 2 -F 12 -F 256 -F 2048 \
-# "${OUT_DIR}/${SAMPLE_NAME}_namesorted.sam" \
-# -o "${OUT_DIR}/${SAMPLE_NAME}_filtered.sam"
 
 # filter name-sorted reads in a pair-aware way
 # -f 2        require properly paired reads (both mates mapped; includes dovetail for bwamem2)

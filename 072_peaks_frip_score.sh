@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=1 
 #SBATCH --mem=4G
 #SBATCH --job-name=frip_score
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/frip_score_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/frip_score_%A_%a.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/072_frip_score_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/072_frip_score_%A_%a.err
 #SBATCH --array=0-29
 
 
@@ -25,13 +25,15 @@ else
 fi
 
 # in directory for bam files
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
 
 # out directory for frip scores
-FRIP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/frip_scores"
+FRIP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/072_frip_scores"
 
-# peak dir
-PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/clean_peaks"
+mkdir -p ${FRIP_DIR}
+
+# peak dir (after removing blacklisted)
+PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/071_peaks_blacklist_removed"
 
 # assaign to array
 mapfile -t BAM_FILES < <(find "${IN_DIR}" -maxdepth 1 -type f -name "*_filtered_namesorted.bam" | sort)
@@ -47,9 +49,9 @@ echo "Processing sample: ${SAMPLE_NAME}"
 #------------------------------------#
 # coordinate sort and index bam file #
 #------------------------------------#
- 
-module load samtools
 
+# load samtools module
+ 
 # coordinate sor
 samtools sort -@ 4 -o "${IN_DIR}/${SAMPLE_NAME}_filtered_coordsorted.bam" "${FILE}"
 

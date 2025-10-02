@@ -6,20 +6,25 @@
 #SBATCH --cpus-per-task=1
 #SBATCH --mem=2G
 #SBATCH --job-name=merge_tech_dups
-#SBATCH --array=0-60             
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/03_merged_fastq/logs/merge_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/03_merged_fastq/logs/merge_%A_%a.err
+#SBATCH --array=0-59             
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/020_merge_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/020_merge_%A_%a.err
+
+#---------#
+# purpose #
+#---------#
+
+# this script merges fastq files of the same library that was sequences across lanes/runs to increase depth
+# forward (R1) and reverse (R2) reads are kept separate 
+# nb: merging should be done as early as possible and before filtering and deduplication as reads 
+# come from the same sample and should be considered together
 
 #--------------------#
 # set up environment #
 #--------------------#
 
-cd /users/k2587336
-
-source ~/.bashrc
-
 # Output directory for merged files (fixed missing '/')
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/03_merged_fastq"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged"
 
 # Sample sheet (tab-delimited: sample, group, replicate, fastq_1, fastq_2, control)
 SAMPLE_SHEET="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"
@@ -29,10 +34,13 @@ echo "[INFO] JobID: ${SLURM_JOB_ID:-na}  ArrayTaskID: ${SLURM_ARRAY_TASK_ID:-na}
 echo "[INFO] OUT_DIR: $OUT_DIR"
 echo "[INFO] SAMPLE_SHEET: $SAMPLE_SHEET"
 
+
 #-----------------------------------------------#
-# Build (key, file) pairs from fastq_1 & fastq_2
+# identify files to combine and assign to array #
+#-----------------------------------------------#
+
 # key = output basename with lane removed (L001/L002 collapsed)
-#-----------------------------------------------#
+# note: array size should be equal to the number of expected files after merging
 
 # Pairs look like: "<out_base>\t<full_path>"
 mapfile -t PAIRS < <(awk -F'\t' '
@@ -58,12 +66,6 @@ if (( N == 0 )); then
   exit 0
 fi
 
-# Safety: if submitted with a larger --array than needed, exit cleanly
-if (( ${SLURM_ARRAY_TASK_ID:-0} >= N )); then
-  echo "[INFO] No work for task ${SLURM_ARRAY_TASK_ID:-na} (N=${N}); exiting."
-  exit 0
-fi
-
 KEY=${KEYS[$SLURM_ARRAY_TASK_ID]}
 OUT="${OUT_DIR}/${KEY}"
 
@@ -79,7 +81,9 @@ for f in "${FILES[@]}"; do
   [[ -f "$f" ]] || { echo "[ERROR] Missing input: $f"; exit 1; }
 done
 
-# Merge (or effectively copy if only one input)
-# Concatenating .fastq.gz is safe: downstream tools accept concatenated gzip members.
+#----------------------#
+# Merge fastq.gz files #
+#----------------------#
+
 cat "${FILES[@]}" > "$OUT"
 echo "[INFO] Wrote: $OUT"

@@ -7,9 +7,9 @@
 #SBATCH --mem=1G # shouldnt require more than a gb per file
 #SBATCH --hint=nomultithread # prefer physical cores for better throughput
 #SBATCH --job-name=fastqc
-#SBATCH --array=1-48 # modify based on number of files
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/02_fastqc/logs/fastqc_%A_%a.err
+#SBATCH --array=0-47 # modify based on number of files
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_fastqc/logs/010_fastqc_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_fastqc/logs/010_fastqc_%A_%a.err
 
 #---------#
 # purpose #
@@ -20,12 +20,6 @@
 #--------------------#
 # set up environment #
 #--------------------#
-
-# change dir to where conda envs are 
-cd /users/k2587336
-
-# load shell
-source ~/.bashrc
 
 # load fastq module
 module load fastqc/0.12.1-gcc-13.2.0

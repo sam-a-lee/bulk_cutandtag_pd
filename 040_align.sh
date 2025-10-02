@@ -6,10 +6,10 @@
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --hint=nomultithread 
-#SBATCH --job-name=seq_align
+#SBATCH --job-name=bwamem2
 #SBATCH --array=0-29 # adjust based on number of samples
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned/logs/seq_align_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned/logs/seq_align_%A_%a.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/040_aligned/logs/040_bwamem2_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/040_aligned/logs/040_bwamem2_%A_%a.err
 
 #---------# 
 # purpose #
@@ -21,24 +21,26 @@
 # set up environment #
 #--------------------#
 
-# change dir to where conda envs are 
-cd /users/k2587336
-
-# load shell
-source ~/.bashrc
+# initiate conda
+CONDA_ROOT="/software/spackages_v0_21_prod/apps/linux-ubuntu22.04-zen2/gcc-13.2.0/anaconda3-2022.10-5wy43yh5crcsmws4afls5thwoskzarhe"
+if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
+  . "${CONDA_ROOT}/etc/profile.d/conda.sh"
+else
+  export PATH="${CONDA_ROOT}/bin:$PATH"
+  eval "$(${CONDA_ROOT}/bin/conda shell.bash hook)"
+fi
 
 # activate conda env
-#source activate bowtie2
-source activate bwa-mem2
+conda activate bwa-mem2
 
 # load samtools
-module load samtools 
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
 # directory where trimmed files are located
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/04_trimmed"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed"
 
 # directory to save output files to
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/05_aligned"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/040_aligned"
 
 # directory where reference genome (hg19) is
 REF="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
@@ -74,31 +76,4 @@ bwa-mem2 mem -t 8 \
 
 echo "Done: ${SAMPLE}"
 
-# run bowtie2
-#bowtie2 --local \
-##    --very-sensitive \
- #   --no-mixed \
- #   --no-discordant \
- #   --dovetail \
- #   --phred33 \
- #   -I 10 \
- #   -X 700 \
- #   -p 8 \
- #   -x ${REF} \
- #   -1 ${R1} \
- #   -2 ${R2} \
- #   -S ${OUT_DIR}/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord.sam \
- #   &> ${OUT_DIR}/logs/${SAMPLE}_bowtie2_local_vsensitive_nomixed_nodiscord_summary.txt
 
-# local = local alignment
-# very sensitivte =  -D 20 -R 3 -N 0 -L 20 -i S,1,0.50 
-# where -D = max number of mismatches in a string; 
-# -R = for reads with repetitive seeds, try X seeds;
-# -L= length of seed substring; 
-# -i =  interval between seed substrings w/r/t read length
-# no mixed = suppress unpaired alignments for paired reads
-# no-discordant = suppress discordant alignments for paired reads
-# dovetail = concordant when mates extend past each other (per nf-core cutandrun pipeline)
-# -I = minimum read length
-# -X = maximum fragment length (10-20ish above max expected length)
-# -p = threads

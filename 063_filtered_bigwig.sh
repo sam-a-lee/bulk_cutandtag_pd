@@ -14,14 +14,8 @@
 # set up environment #
 #--------------------#
 
-# change dir to where conda envs are 
-cd /users/k2587336
-
-# load shell
-source ~/.bashrc
-
-# load bedtools conda env 
-source activate bedtools
+# load bedtools module 
+module load bedtools2/2.31.0-gcc-12.3.0-python-3.11.6
 
 # dir containing input files
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_fragments"

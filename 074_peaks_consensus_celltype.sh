@@ -6,8 +6,8 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --job-name=consensus_peaks_by_celltype
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/consensus_peaks_%j.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/logs/consensus_peaks_%j.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/074_consensus_peaks_%j.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/074_consensus_peaks_%j.err
 
 #--------------------#
 # set up environment #
@@ -25,22 +25,33 @@ fi
 # load macs conda env
 conda activate macs3
 
-# load modules
-module load samtools
+# load module 
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
 # BAMs live here; filenames like IGF136815_filtered_namesorted.bam
-BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/07_filtered_reads"
+BAM_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
 
 # sample sheet (tab-delimited). Col1: PDCxxx_celltype; Col4: FASTQ path containing IGF######
 SAMPLE_SHEET="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"
 
 # output directories
-PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/consensus_peaks"
+PEAK_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/074_peaks_consensus_celltype"
 
 # tmp dir for organizing bams by cell type
-TMP_DIR="$/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/08_peaks/tmp_$$"
+TMP_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/074_peaks_consensus_celltype/tmp_$$"
 
-mkdir -p "${TMP_DIR}"
+mkdir -p "${PEAK_DIR}" "${TMP_DIR}"
+
+# Exclude any sample IDs starting with these prefixes
+EXCLUDE_PREFIXES=("IGF136815" "IGF136816" "IGF136817")
+
+is_excluded() {
+  local id="$1"
+  for p in "${EXCLUDE_PREFIXES[@]}"; do
+    [[ "$id" == ${p}* ]] && return 0
+  done
+  return 1
+}
 
 #----------------------------#
 # parse sheet -> ct,sampleid #
@@ -53,12 +64,9 @@ MAP_TSV="${TMP_DIR}/celltype_sample.tsv"
 # Produces lines: "<celltype>\t<IGF#######>"
 awk -F'\t' '
   NR>1 {
-    # Enforce: first column must start with PDC or PD + digits + underscore
     if ($1 ~ /^PD(C)?[0-9]+_/) {
-      # cell type = everything after first underscore
       split($1, a, /_/);
       ct = (length(a)>1 ? a[2] : "");
-      # sample id from col4: IGF followed by digits
       id = "";
       if (match($4, /(IGF[0-9]+)/, m)) { id = m[1]; }
       if (ct != "" && id != "") {
@@ -92,27 +100,33 @@ for ct in "${CELLTYPES[@]}"; do
     continue
   fi
 
-  # build list of BAMs
+  # build list of BAMs, skipping excluded prefixes
   BAM_LIST="${TMP_DIR}/bams_${ct}.list"
   : > "${BAM_LIST}"
 
   missing=0
+  excluded=0
+  included=0
   for sid in "${SIDS[@]}"; do
+    if is_excluded "$sid"; then
+      excluded=$((excluded+1))
+      continue
+    fi
     bam="${BAM_DIR}/${sid}_filtered_namesorted.bam"
     if [ -s "${bam}" ]; then
       echo "${bam}" >> "${BAM_LIST}"
+      included=$((included+1))
     else
       echo "[WARN] Missing BAM for ${sid}: ${bam}"
       missing=$((missing+1))
     fi
   done
 
-  total=$(wc -l < "${BAM_LIST}" || echo 0)
-  if [ "${total}" -eq 0 ]; then
-    echo "[WARN] No BAMs present for ${ct}; skipping."
+  if [ "${included}" -eq 0 ]; then
+    echo "[WARN] No BAMs present for ${ct} after exclusions (excluded=${excluded}, missing=${missing}); skipping."
     continue
   fi
-  echo "[INFO] Using ${total} BAM(s) for ${ct} (${missing} missing)."
+  echo "[INFO] Using ${included} BAM(s) for ${ct} (excluded=${excluded}, missing=${missing})."
 
   # paths for merged outputs
   MERGED_NAME="${PEAK_DIR}/${ct}_merged_namesorted.bam"
@@ -132,7 +146,6 @@ for ct in "${CELLTYPES[@]}"; do
     -f BAMPE \
     -g "hs" \
     -q "0.00001" \
-    --bw "401" \
     --keep-dup all \
     --verbose 3 \
     --nolambda \
