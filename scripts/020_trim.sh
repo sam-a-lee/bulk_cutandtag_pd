@@ -7,8 +7,8 @@
 #SBATCH --mem=4G
 #SBATCH --job-name=cutadapt
 #SBATCH --array=0-29 # !!! modify to number of unique samples being processing !!!
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed/logs/030_cutadapt_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed/logs/030_cutadapt_%A_%a.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_trimmed/logs/020_cutadapt_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_trimmed/logs/020_cutadapt_%A_%a.err
 
 #---------# 
 # purpose #
@@ -24,10 +24,10 @@
 module load py-cutadapt/4.4-gcc-13.2.0-python-3.11.6
 
 # root dir where raw fastq files are stored
-ROOT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged"
+ROOT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged"
 
 # directory to save files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_trimmed"
 
 mkdir -p $OUT_DIR
 
@@ -40,7 +40,7 @@ SAMPLES=($(find "${ROOT_DIR}" -maxdepth 1 -type f -name "*_R1_001.fastq.gz" | so
 
 # pick sample based on job array index
 R1=${SAMPLES[$SLURM_ARRAY_TASK_ID]}
-R2="${R1/_R1_001.fastq.gz/_R2_001.fastq.gz}"
+R2="${R1/_R1_001.fastq.gz/_R2_001_fastq.gz}"
 
 BASE=$(basename "${R1}" _R1_001.fastq.gz)
 

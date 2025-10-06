@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=1 # could specify more here if wanted 
 #SBATCH --mem=1G # shouldnt require more than a gb per file
 #SBATCH --job-name=fastqc
-#SBATCH --array=0-29 # modify based on number of files
+#SBATCH --array=0-59 # modify based on number of files
 #SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed/logs/031_fastqc_%A_%a.out
 #SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimmed/logs/031_fastqc_%A_%a.err
 

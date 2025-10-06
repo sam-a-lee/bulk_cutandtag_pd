@@ -7,8 +7,8 @@
 #SBATCH --mem=2G
 #SBATCH --job-name=merge_tech_dups
 #SBATCH --array=0-59             
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/020_merge_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/020_merge_%A_%a.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged/logs/010_merge_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged/logs/010_merge_%A_%a.err
 
 #---------#
 # purpose #
@@ -24,7 +24,7 @@
 #--------------------#
 
 # Output directory for merged files (fixed missing '/')
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged"
 
 # Sample sheet (tab-delimited: sample, group, replicate, fastq_1, fastq_2, control)
 SAMPLE_SHEET="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_sheet.txt"

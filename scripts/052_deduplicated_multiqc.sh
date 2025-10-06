@@ -29,7 +29,7 @@ DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/050_deduplic
 #---------------------------------#
 
 multiqc \
-    --outdir ${OUT_DIR} \
+    --outdir ${DIR} \
     --verbose \
-    ${IN_DIR}
+    ${DIR}
 

@@ -8,8 +8,8 @@
 #SBATCH --hint=nomultithread # prefer physical cores for better throughput
 #SBATCH --job-name=fastqc
 #SBATCH --array=0-59 # modify based on number of files
-#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/021_merged_fastqc_%A_%a.out
-#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/logs/021_merged_fastqc_%A_%a.err
+#SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged/logs/021_merged_fastqc_%A_%a.out
+#SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged/logs/021_merged_fastqc_%A_%a.err
 
 #---------#
 # purpose #
@@ -25,10 +25,10 @@
 module load fastqc/0.12.1-gcc-13.2.0
 
 # input dir of files
-IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged"
+IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged"
 
 # output directory for fastqc files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/020_merged/021_fastqc"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/010_merged/011_fastqc"
 
 mkdir -p ${OUT_DIR}
 
