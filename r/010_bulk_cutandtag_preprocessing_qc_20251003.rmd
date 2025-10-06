@@ -1,0 +1,764 @@
+---
+title: "PD bulk CUT&Tag preprocessing and quality control"
+author: "Samantha Lee"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Read data in 
+
+Load required libraries
+```{r libs}
+library(here) # dir calling
+library(tidyverse) # data wrangling 
+library(plotly) # interactive plotting
+library(readxl) # read xls files
+library(DESeq2) # depth normalization + diff analysis
+library(pvca) # examine variance in pcs
+source(here("scripts","r","heat_scree_plot_corr.r"))
+```
+
+Read in participant metadata
+```{r data_in_meta}
+meta <- read.csv(here("resources",
+                      "metadata",
+                      "metadata_participants.csv")) %>%
+  mutate(group = ifelse(grepl("PDC", pid), "control", "pd"))
+```
+
+Read in fastQC data for merged fastq files. 
+```{r data_in_merged_fastqc}
+merged_fastqc <- read_table(here("data_out",
+                                 "020_merged",
+                                 "021_fastqc",
+                                 "multiqc_data",
+                                 "multiqc_fastqc.txt"), 
+                            col_names = T)
+```
+
+Read in fastQC data for trimmed fastq files. 
+```{r data_in_trimmed_fastqc}
+trimmed_fastqc <- read_table(here("data_out",
+                                  "030_trimmed",
+                                  "031_fastqc",
+                                  "multiqc_data",
+                                  "multiqc_fastqc.txt"), 
+                             col_names = T)  
+```
+
+Read in samtools stat data for aligned reads. 
+```{r data_in_aligned_samtools_stats}
+collect_sn_metrics <- function(
+    indir,
+    pattern,   # files ending with .stats
+    recursive = TRUE,
+    out_csv = "sn_metrics.csv"
+) {
+  files <- list.files(indir, pattern = pattern, recursive = recursive, full.names = TRUE)
+  if (length(files) == 0L) stop("No files matched '", pattern, "' in ", indir)
+  
+  parse_one <- function(path) {
+    lns <- readLines(path, warn = FALSE)
+    sn <- grep("^SN\\t", lns, value = TRUE)
+    if (!length(sn)) return(NULL)
+    
+    # Clean: drop leading "SN\t", remove inline comments after a tab (e.g., "\t# ...")
+    sn <- sub("^SN\\t", "", sn)
+    sn <- sub("\\t#.*$", "", sn)
+    
+    parts <- strsplit(sn, "\t", fixed = TRUE)
+    metrics <- vapply(parts, function(x) sub(":$", "", x[1]), character(1))
+    values  <- vapply(parts, function(x) x[2], character(1))
+    
+    # Best-effort numeric casting (handles integers and scientific notation)
+    values_tc <- type.convert(values, as.is = TRUE)
+    
+    # Build one-row data.frame
+    df <- as.data.frame(as.list(values_tc), stringsAsFactors = FALSE, optional = TRUE)
+    names(df) <- metrics
+    
+    # Sample name: prefer IGF####### in filename; else stem before '_' ; else stem
+    fname <- basename(path)
+    igf <- regmatches(fname, regexpr("IGF\\d+", fname))
+    sample <- if (length(igf) && igf != "") {
+      igf
+    } else {
+      stem <- sub("\\.[^.]*$", "", fname)
+      if (grepl("_", stem)) sub("_.*$", "", stem) else stem
+    }
+    
+    df$sample <- sample
+    df
+  }
+  
+  dfs <- Filter(Negate(is.null), lapply(files, parse_one))
+  if (!length(dfs)) stop("Parsed no SN metrics from matched files.")
+  
+  # Row-bind (fill missing columns), move 'sample' first, sort other columns
+  all_cols <- unique(c("sample", sort(unique(unlist(lapply(dfs, names)))) ))
+  dfs2 <- lapply(dfs, function(d) {
+    missing <- setdiff(all_cols, names(d))
+    if (length(missing)) d[missing] <- NA
+    d[all_cols]
+  })
+  
+  # write out
+  out <- unique(do.call(rbind, dfs2))
+  # utils::write.csv(out, out_csv, row.names = FALSE)
+  # message("Wrote ", out_csv, " with ", nrow(out), " samples and ", ncol(out)-1, " metrics.")
+  # invisible(out)
+}
+
+# get file stats
+aligned_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "040_aligned",
+                 "041_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)
+```
+
+Read in fastQC data for aligned and deduplicated reads. 
+```{r data_in_deduplicated_fastqc}
+deduplicated_fastqc <- read_table(here("data_out",
+                                       "050_deduplicated",
+                                       "051_fastqc",
+                                       "multiqc_data",
+                                       "multiqc_fastqc.txt"), 
+                                  col_names = T)    
+```
+
+Read in samtools stats data for aligned and deduplicated reads. 
+```{r data_in_deduplicated_samtools_stats}
+deduplicated_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "050_deduplicated",
+                 "053_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)  
+```
+
+Read in samtools stats data for aligned, deduplicated, and quality filtered reads.
+```{r data_in_filtered_samtools_stats}
+filtered_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "060_filtered",
+                 "061_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)  
+```
+
+Read in fragment length data (TLEN from quality filtered sam files).
+```{r data_in_filtered_fragment_lengths}
+sample_from_file <- function(path) {
+  fname <- basename(path)
+  igf <- regmatches(fname, regexpr("IGF\\d+", fname))
+  if (length(igf) && igf != "") return(igf)
+  stem <- sub("\\.[^.]*$", "", fname)
+  if (grepl("_", stem)) sub("_.*$", "", stem) else stem
+}
+
+# Read one file: 2 columns (length, count), no header
+read_frag_file <- function(path) {
+  df <- read.table(path, header = FALSE,
+                   col.names = c("insert_size", "count"),
+                   colClasses = c("integer", "numeric"))
+  df$sample <- sample_from_file(path)
+  df
+}
+
+# Collect all files that match a regex (change pattern as needed)
+collect_fragments <- function(indir,
+                              pattern = "\\.txt$",   # <-- change to your extension
+                              recursive = TRUE) {
+  files <- list.files(indir, pattern = pattern, recursive = recursive, full.names = TRUE)
+  if (!length(files)) stop("No files matched regex pattern: ", pattern, " in ", indir)
+  
+  dfs <- lapply(files, read_frag_file)
+  do.call(rbind, dfs)
+}
+
+# get frag lengths
+frag_lengths <- collect_fragments(here("data_out",
+                                       "060_filtered",
+                                       "062_fragment_lengths"), 
+                                  pattern = "\\.txt$")  
+```
+
+Read in FRiP scores. 
+```{r data_in_peaks_frip_scores}
+frip_in <- function(f) {
+  read_table(f,
+             skip = 0, 
+             col_names = T)
+}
+
+frip_scores <- map_dfr(list.files(here("data_out",
+                                       "070_peaks", 
+                                       "072_frip_scores"),
+                                  pattern = "^.*\\.txt$",
+                                  full.names = TRUE), 
+                       frip_in) 
+```
+
+## Total read count (forward and reverse) across preprocessing steps
+
+```{r plot_read_counts}
+read_count_plot <- data.frame(sample = filtered_stats$sample,
+                              merged_reads = merged_fastqc %>% subset(grepl("R1", Sample)) %>% pull(Sequences_1)*2,
+                              trimmed_reads = trimmed_fastqc %>% subset(grepl("R1", Sample)) %>% pull(Sequences_1)*2,
+                              aligned_reads = aligned_stats$`reads mapped and paired`,
+                              deduplicated_reads = deduplicated_stats$`reads mapped and paired`,
+                              filtered_reads = filtered_stats$`reads mapped and paired`) %>%
+  pivot_longer(-sample) %>%
+  mutate(name = factor(name, levels = c("merged_reads", 
+                                        "trimmed_reads",
+                                        "aligned_reads",
+                                        "deduplicated_reads",
+                                        "filtered_reads"))) %>%
+  ggplot(aes(x = name, 
+             y= value/1000000,
+             fill = name)) +
+  geom_col() +
+  geom_hline(yintercept = 10, 
+             color = "#e1235c", 
+             linetype = "dashed", 
+             linewidth = 0.25) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90,
+                                   hjust = 0,
+                                   vjust = 0.5)) +
+  facet_wrap(~sample) +
+  scale_x_discrete(name = "Preprocessing step",
+                   labels = c("Raw", "Trimmed", "Aligned", "Deduplicated", "Filtered")) +
+  scale_y_continuous(name = "Total reads (millions)") +
+  scale_fill_manual(values = c("#00033f",
+                               "#002965",
+                               "#1d4f8b",
+                               "#4375b1",
+                               "#689ad6"))
+ggplotly(read_count_plot)
+```
+
+**Interpretation**: Read counts look good. All samples have >10 million reads after alignment, deduplicate, and quality filtering. All samples pass. 
+
+
+## Distribution of fragment lengths
+
+```{r plot_fragment_lengths}
+tlen_plot <- ggplot(frag_lengths,
+                    aes(x=insert_size,
+                        y = count,
+                        color=sample)) +
+  geom_line() +
+  # geom_smooth(se = FALSE, method = "loess", span = 0.15) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c(RColorBrewer::brewer.pal(3, "Greens"),
+                                RColorBrewer::brewer.pal(3, "Oranges"),
+                                RColorBrewer::brewer.pal(3, "Blues"),
+                                RColorBrewer::brewer.pal(3, "Purples"),
+                                RColorBrewer::brewer.pal(3, "Reds"),
+                                RColorBrewer::brewer.pal(3, "Greens"),
+                                RColorBrewer::brewer.pal(3, "Oranges"),
+                                RColorBrewer::brewer.pal(3, "Blues"),
+                                RColorBrewer::brewer.pal(3, "Purples"),
+                                RColorBrewer::brewer.pal(3, "Reds"))) +
+  scale_y_continuous(name = "Count") +
+  scale_x_continuous(name = "Fragment size (bp)")
+
+ggplotly(tlen_plot)
+```
+
+
+**Interpretation**: Most distributions look reasonable. A few are skewed towards smaller fragments. All samples pass based on visual checks. 
+
+## Fraction of Reads in Peaks (FRiP) scores
+
+```{r frip_plot}
+frip_plot <- ggplot(frip_scores,
+                    aes(x = file, 
+                        y = percent)) +
+  geom_col(fill = "#002965") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, 
+                                   hjust = 0,
+                                   vjust = 0.5)) +
+  scale_x_discrete(name = "Sample") +
+  scale_y_continuous("Fraction of reads in peaks(%)") +
+  geom_hline(yintercept = 10, 
+             color = "#e1235c", 
+             linetype = "dashed", 
+             linewidth = 0.5) +
+  geom_hline(yintercept = 20, 
+             color = "#e1235c", 
+             linetype = "dotted", 
+             linewidth = 0.5) 
+
+ggplotly(frip_plot)
+```
+
+
+**Interpretation**: FRiP >20% considered good and >10% acceptable. Samples ending in 15, 16, and 17 belong to the same control participant and all exhibit FRiP <10%. Discard IGF136815, IGF136816, and IGF136817 from all downstream analyses.  
+
+## Consesus features across all samples
+
+Clustering is based on sample feature (peak) counts across all consensus peaks (identified using all samples except for IGF136815, IGF136816, and IGF136817).
+
+Read in feature count data for all sampla
+```{r data_in_peaks_feature_counts_all}
+# list files and derive sample names
+tsv_files <- list.files(here("data_out",
+                             "070_peaks",
+                             "077_peaks_feature_counts_all"), 
+                        pattern = "*.tsv$", 
+                        full.names = TRUE)
+
+# get sample names from file names
+sample_names <- sub("_feature_counts_all_multicov\\.tsv$", 
+                    "", 
+                    basename(tsv_files))
+
+# read each file, take the last column, and column-bind into one data frame
+features_all <- purrr::imap_dfc(
+  tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+
+colnames(features_all) <- c("chr", "start", "end", sample_names) 
+
+features_all_clean <- features_all %>%
+  select(-c(IGF136815, IGF136816, IGF136817))
+```
+
+Normalize feature counts and conduct pca
+```{r norm_all_consensus_feature_data}
+dds <- DESeqDataSetFromMatrix(countData = features_all_clean[,-c(1:3)],
+                              colData = meta %>%
+                                subset(!grepl("IGF136815|IGF136816|IGF136817", sample)),
+                              design = ~ 1) 
+
+# peaks with very low counts 
+dds <- dds[rowSums(counts(dds)) >= 5, ]          
+vs  <- vst(dds,
+           fitType = "local",
+           blind = TRUE)                    
+mat <- assay(vs)
+
+pc <- prcomp(t(mat), center = TRUE, scale. = TRUE)
+```
+
+```{r heat_scree_all}
+pc_importance <- (pc$sdev^2) / sum(pc$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_all_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_all_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc$x, pc_importance, 8, c(1:8), meta_categorical, meta_continuous)
+
+```
+
+### Cell type clustering
+
+```{r celltype_clustering}
+# combine metadata with pcs
+pcs <- data.frame(pc$x[,1:5], 
+                  meta %>%
+                    subset(!grepl("IGF136815|IGF136816|IGF136817", sample)))
+
+celltype_plot <- ggplot(pcs, 
+                        aes(PC1, 
+                            PC2, 
+                            color = celltype, 
+                            shape = group)) +
+  geom_point(size=3,
+             alpha = 0.8) +
+  labs(x=paste0("PC1"),
+       y=paste0("PC2")) +
+  theme_bw() +
+  scale_colour_manual(values = c("#00033f", "#e1235c", "#7c91a7"))
+
+ggplotly(celltype_plot)
+```
+
+### heat map
+```{r seqminer}
+# annotate genes
+# convert peaks to granges obj
+features_all_gr <- GRanges(seqnames = features_all_clean$chr,
+                                     ranges   = IRanges(as.numeric(features_all_clean$start), 
+                                                        as.numeric(features_all_clean$end)),
+                                     strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(features_all_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks for samples
+features_all_anno <- annotatePeak(features_all_gr, 
+                                            TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                            tssRegion=c(-3000,3000), 
+                                            annoDb="org.Hs.eg.db")
+
+promoter_df <- subset(features_all_anno, grepl("Promoter", annotation))
+genes <- unique(na.omit(as.data.frame(promoter_df)$ENSEMBL))
+
+
+
+# Build TSS points for those genes, then ±3 kb windows
+all_genes <- genes(TxDb.Hsapiens.UCSC.hg38.knownGene)
+genes_gr  <- all_genes[names(all_genes) %in% genes]
+tss <- promoters(genes_gr, upstream = 1, downstream = 1)  # width 1 at TSS
+regions <- resize(tss, width = 6000, fix = "center")      # TSS ±3 kb
+
+
+
+# Harmonize seqlevels style with bigWigs (usually UCSC "chr")
+seqlevelsStyle(regions) <- "UCSC"
+
+
+gr_sc <- import(dis_bw, selection = BigWigSelection(regions))   # scores over tiles
+mean_by_region <- tapply(gr_sc$score, gr_sc$group, mean, na.rm = TRUE)
+regions$mean_dis <- mean_by_region[names(regions)]
+```
+
+
+
+## Consensus features across cell types
+
+```{r data_in_feature_counts}
+microglia_tsv_files <- list.files(here("data_out",
+                                       "070_peaks",
+                                       "078_peaks_feature_counts_celltype"), 
+                                  pattern = "*microglia*", 
+                                  full.names = TRUE)
+
+oligodendrocyte_tsv_files <- list.files(here("data_out",
+                                             "070_peaks",
+                                             "078_peaks_feature_counts_celltype"), 
+                                        pattern = "*oligodendrocyte*", 
+                                        full.names = TRUE)
+
+neuron_tsv_files <- list.files(here("data_out",
+                                    "070_peaks",
+                                    "078_peaks_feature_counts_celltype"), 
+                               pattern = "*neuron*", 
+                               full.names = TRUE)
+
+features_microglia <- map_dfc(
+  microglia_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+features_oligodendrocyte <- map_dfc(
+  oligodendrocyte_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+features_neuron <- map_dfc(
+  neuron_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+colnames(features_microglia) <- sub("_microglia_multicov\\.tsv$", 
+                                    "", 
+                                    basename(microglia_tsv_files))
+
+colnames(features_oligodendrocyte) <- sub("_oligodendrocytes_multicov\\.tsv$", 
+                                          "", 
+                                          basename(oligodendrocyte_tsv_files))
+
+colnames(features_neuron) <- sub("_neuron_multicov\\.tsv$", 
+                                 "", 
+                                 basename(neuron_tsv_files))
+
+# remove low frip samples
+features_microglia_clean <- features_microglia %>%
+  select(!"IGF136817")
+
+features_oligodendrocyte_clean <- features_oligodendrocyte %>%
+  select(!"IGF136816")
+
+features_neuron_clean <- features_neuron %>%
+  select(!"IGF136815")
+```
+
+Normalize microglia feature counts and conduct pca
+```{r norm_microglia_consensus_feature_data}
+dds_microglia <- DESeqDataSetFromMatrix(countData = features_microglia_clean,
+                                        colData = meta %>%
+                                          mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                          subset(sample %in% colnames(features_microglia_clean)),
+                                        design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_microglia  <- vst(dds_microglia, blind = TRUE)                    
+mat_microglia <- assay(vs_microglia)
+
+pc_microglia <- prcomp(t(mat_microglia), center = TRUE, scale. = TRUE)
+```
+
+
+```{r microglia_heat_scree}
+pc_microglia_importance <- (pc_microglia$sdev^2) / sum(pc_microglia$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_microglia_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_microglia_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_microglia$x, pc_microglia_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+
+Normalize oligodendrocyte feature counts and conduct pca
+```{r norm_oligodendrocyte_consensus_feature_data}
+dds_oligodendrocyte <- DESeqDataSetFromMatrix(countData = features_oligodendrocyte_clean,
+                                              colData = meta %>%
+                                                mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                                subset(sample %in% colnames(features_oligodendrocyte_clean)),
+                                              design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_oligodendrocyte  <- vst(dds_oligodendrocyte, blind = TRUE)                    
+mat_oligodendrocyte <- assay(vs_oligodendrocyte)
+
+pc_oligodendrocyte <- prcomp(t(mat_oligodendrocyte), center = TRUE, scale. = TRUE)
+```
+
+
+```{r oligodendrocyte_heat_scree}
+pc_oligodendrocyte_importance <- (pc_oligodendrocyte$sdev^2) / sum(pc_oligodendrocyte$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_oligodendrocyte_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_oligodendrocyte_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_oligodendrocyte$x, pc_oligodendrocyte_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+
+Normalize neuron feature counts and conduct pca
+```{r norm_neuron_consensus_feature_data}
+dds_neuron <- DESeqDataSetFromMatrix(countData = features_neuron_clean,
+                                     colData = meta %>%
+                                       mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                       subset(sample %in% colnames(features_neuron_clean)),
+                                     design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_neuron  <- vst(dds_neuron, blind = TRUE)                    
+mat_neuron <- assay(vs_neuron)
+
+pc_neuron <- prcomp(t(mat_neuron), center = TRUE, scale. = TRUE)
+```
+
+```{r neuron_heat_scree}
+pc_neuron_importance <- (pc_neuron$sdev^2) / sum(pc_neuron$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_neuron_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_neuron_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_neuron$x, pc_neuron_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+
+
+
+
+```{r scraps}
+## install.packages("BiocManager")
+## BiocManager::install(c("rtracklayer","GenomicRanges","EnrichedHeatmap",
+##                        "ComplexHeatmap","ChIPseeker",
+##                        "TxDb.Hsapiens.UCSC.hg38.knownGene","org.Hs.eg.db"))
+
+library(rtracklayer)
+library(GenomicRanges)
+library(EnrichedHeatmap)
+library(ComplexHeatmap)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+
+# --------------------------
+# 1) Inputs
+# --------------------------
+# Cell-type bigWigs you already generated (RPGC-normalized is ideal)
+bw_files <- c(
+  "path/to/CellTypeA_merged_all_RPGC.bw",
+  "path/to/CellTypeB_merged_all_RPGC.bw",
+  "path/to/CellTypeC_merged_all_RPGC.bw"
+)
+cell_types <- gsub("_merged.*$", "", basename(bw_files))
+
+# Optional: peak set(s) to center on (BED/narrowPeak) — use union peaks or a CT-specific set
+peaks_bed <- "path/to/union_peaks.bed"  # or any peak set you want to visualize
+
+# --------------------------
+# 2) Define regions to visualize
+#    Option A: promoters/TSS windows (±2 kb) from TxDb
+# --------------------------
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+promoters <- getPromoters(TxDb = txdb, upstream = 2000, downstream = 2000)
+
+#    Option B: peak-centered windows (±2 kb) and annotate with ChIPseeker
+peaks <- readPeakFile(peaks_bed)
+peakAnno <- annotatePeak(peaks, TxDb = txdb, annoDb = "org.Hs.eg.db")
+peak_windows <- suppressWarnings(
+  promoters(peakAnno@anno, upstream = 2000, downstream = 2000) # window around peak centers
+)
+
+# Pick one set of regions for the heatmap:
+regions <- promoters           # TSS-centered
+# regions <- peak_windows      # peak-centered
+
+# (Optional) Subset by annotation category, e.g., promoters only
+# prom_idx <- grepl("Promoter", as.data.frame(peakAnno@anno)$annotation)
+# regions <- peak_windows[prom_idx]
+
+# --------------------------
+# 3) Import bigWigs and convert to matrices
+# --------------------------
+# normalizeToMatrix() bins signal around each region into a matrix
+# extend: half-window on each side (here 2 kb)
+# w: bin size in bp (here 50) → 4,000 / 50 = 80 columns
+extend_bp <- 2000
+bin_w     <- 50
+
+bw_rle_list <- lapply(bw_files, function(f) import(f, format = "bigWig", as = "RleList"))
+
+mats <- lapply(bw_rle_list, function(bw_rle) {
+  normalizeToMatrix(bw_rle,
+                    target      = regions,
+                    extend      = extend_bp,
+                    w           = bin_w,
+                    background  = 0,
+                    smooth      = TRUE,
+                    mean_mode   = "w0")
+})
+
+# --------------------------
+# 4) Build heatmaps (+ average profiles) for each cell type
+# --------------------------
+# Common top annotation: mean profile line per heatmap
+top_anno <- HeatmapAnnotation(enriched = anno_enriched(yaxis = FALSE))
+
+# Optional: order rows (regions) by the first matrix’s clustering or by max signal
+ord <- EnrichedHeatmap::get_order(EnrichedHeatmap(mats[[1]]))
+
+ht_list <- NULL
+for (i in seq_along(mats)) {
+  nm <- cell_types[i]
+  ht <- EnrichedHeatmap(mats[[i]],
+                        name = nm,
+                        top_annotation = top_anno,
+                        column_title = paste0(nm, " signal"),
+                        use_raster = TRUE) # faster for big matrices
+  ht_list <- if (is.null(ht_list)) ht else (ht_list + ht)
+}
+
+# Draw all side-by-side; apply consistent row order so bands align across tracks
+draw( ht_list, split = NULL, row_order = ord )
+
+# --------------------------
+# 5) Optional: z-score per region to compare shapes rather than magnitude
+# --------------------------
+zscore <- function(m) {
+  m2 <- t(scale(t(m)))     # center/scale each row (region)
+  m2[is.nan(m2)] <- 0
+  m2
+}
+mats_z <- lapply(mats, zscore)
+
+ht_list_z <- NULL
+for (i in seq_along(mats_z)) {
+  nm <- paste0(cell_types[i], "_z")
+  ht <- EnrichedHeatmap(mats_z[[i]],
+                        name = nm,
+                        top_annotation = HeatmapAnnotation(enriched = anno_enriched(yaxis = FALSE)),
+                        column_title = paste0(cell_types[i], " (z-score)"),
+                        use_raster = TRUE)
+  ht_list_z <- if (is.null(ht_list_z)) ht else (ht_list_z + ht)
+}
+draw( ht_list_z, row_order = ord )
+
+# --------------------------
+# 6) Save as PDF
+# --------------------------
+pdf("celltype_heatmaps.pdf", width = 10, height = 6)
+draw( ht_list, row_order = ord )
+dev.off()
+
+pdf("celltype_heatmaps_zscore.pdf", width = 10, height = 6)
+draw( ht_list_z, row_order = ord )
+dev.off()
+
+
+
+```

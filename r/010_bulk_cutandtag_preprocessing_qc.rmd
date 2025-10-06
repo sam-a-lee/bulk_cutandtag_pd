@@ -1,0 +1,641 @@
+---
+title: "PD bulk CUT&Tag preprocessing and quality control"
+author: "Samantha Lee"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Read data in 
+
+Load required libraries
+```{r libs}
+library(here) # dir calling
+library(tidyverse) # data wrangling 
+library(plotly) # interactive plotting
+library(readxl) # read xls files
+library(DESeq2) # depth normalization + diff analysis
+library(pvca) # examine variance in pcs
+source(here("scripts","r","heat_scree_plot_corr.r"))
+```
+
+Read in participant metadata
+```{r data_in_meta}
+meta <- read.csv(here("resources",
+                      "metadata",
+                      "metadata_participants.csv")) %>%
+  mutate(group = ifelse(grepl("PDC", pid), "control", "pd"))
+```
+
+Read in fastQC data for merged fastq files. 
+```{r data_in_merged_fastqc}
+merged_fastqc <- read_table(here("data_out",
+                                 "020_merged",
+                                 "021_fastqc",
+                                 "multiqc_data",
+                                 "multiqc_fastqc.txt"), 
+                            col_names = T)
+```
+
+Read in fastQC data for trimmed fastq files. 
+```{r data_in_trimmed_fastqc}
+trimmed_fastqc <- read_table(here("data_out",
+                                  "030_trimmed",
+                                  "031_fastqc",
+                                  "multiqc_data",
+                                  "multiqc_fastqc.txt"), 
+                             col_names = T)  
+```
+
+Read in samtools stat data for aligned reads. 
+```{r data_in_aligned_samtools_stats}
+collect_sn_metrics <- function(
+    indir,
+    pattern,   # files ending with .stats
+    recursive = TRUE,
+    out_csv = "sn_metrics.csv"
+) {
+  files <- list.files(indir, pattern = pattern, recursive = recursive, full.names = TRUE)
+  if (length(files) == 0L) stop("No files matched '", pattern, "' in ", indir)
+  
+  parse_one <- function(path) {
+    lns <- readLines(path, warn = FALSE)
+    sn <- grep("^SN\\t", lns, value = TRUE)
+    if (!length(sn)) return(NULL)
+    
+    # Clean: drop leading "SN\t", remove inline comments after a tab (e.g., "\t# ...")
+    sn <- sub("^SN\\t", "", sn)
+    sn <- sub("\\t#.*$", "", sn)
+    
+    parts <- strsplit(sn, "\t", fixed = TRUE)
+    metrics <- vapply(parts, function(x) sub(":$", "", x[1]), character(1))
+    values  <- vapply(parts, function(x) x[2], character(1))
+    
+    # Best-effort numeric casting (handles integers and scientific notation)
+    values_tc <- type.convert(values, as.is = TRUE)
+    
+    # Build one-row data.frame
+    df <- as.data.frame(as.list(values_tc), stringsAsFactors = FALSE, optional = TRUE)
+    names(df) <- metrics
+    
+    # Sample name: prefer IGF####### in filename; else stem before '_' ; else stem
+    fname <- basename(path)
+    igf <- regmatches(fname, regexpr("IGF\\d+", fname))
+    sample <- if (length(igf) && igf != "") {
+      igf
+    } else {
+      stem <- sub("\\.[^.]*$", "", fname)
+      if (grepl("_", stem)) sub("_.*$", "", stem) else stem
+    }
+    
+    df$sample <- sample
+    df
+  }
+  
+  dfs <- Filter(Negate(is.null), lapply(files, parse_one))
+  if (!length(dfs)) stop("Parsed no SN metrics from matched files.")
+  
+  # Row-bind (fill missing columns), move 'sample' first, sort other columns
+  all_cols <- unique(c("sample", sort(unique(unlist(lapply(dfs, names)))) ))
+  dfs2 <- lapply(dfs, function(d) {
+    missing <- setdiff(all_cols, names(d))
+    if (length(missing)) d[missing] <- NA
+    d[all_cols]
+  })
+  
+  # write out
+  out <- unique(do.call(rbind, dfs2))
+  # utils::write.csv(out, out_csv, row.names = FALSE)
+  # message("Wrote ", out_csv, " with ", nrow(out), " samples and ", ncol(out)-1, " metrics.")
+  # invisible(out)
+}
+
+# get file stats
+aligned_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "040_aligned",
+                 "041_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)
+```
+
+Read in fastQC data for aligned and deduplicated reads. 
+```{r data_in_deduplicated_fastqc}
+deduplicated_fastqc <- read_table(here("data_out",
+                                       "050_deduplicated",
+                                       "051_fastqc",
+                                       "multiqc_data",
+                                       "multiqc_fastqc.txt"), 
+                                  col_names = T)    
+```
+
+Read in samtools stats data for aligned and deduplicated reads. 
+```{r data_in_deduplicated_samtools_stats}
+deduplicated_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "050_deduplicated",
+                 "053_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)  
+```
+
+Read in samtools stats data for aligned, deduplicated, and quality filtered reads.
+```{r data_in_filtered_samtools_stats}
+filtered_stats <- collect_sn_metrics(
+  indir   = here("data_out",
+                 "060_filtered",
+                 "061_samtools_stats"),
+  pattern = "\\.txt$",        
+  recursive = TRUE
+)  
+```
+
+Read in fragment length data (TLEN from quality filtered sam files).
+```{r data_in_filtered_fragment_lengths}
+sample_from_file <- function(path) {
+  fname <- basename(path)
+  igf <- regmatches(fname, regexpr("IGF\\d+", fname))
+  if (length(igf) && igf != "") return(igf)
+  stem <- sub("\\.[^.]*$", "", fname)
+  if (grepl("_", stem)) sub("_.*$", "", stem) else stem
+}
+
+# Read one file: 2 columns (length, count), no header
+read_frag_file <- function(path) {
+  df <- read.table(path, header = FALSE,
+                   col.names = c("insert_size", "count"),
+                   colClasses = c("integer", "numeric"))
+  df$sample <- sample_from_file(path)
+  df
+}
+
+# Collect all files that match a regex (change pattern as needed)
+collect_fragments <- function(indir,
+                              pattern = "\\.txt$",   # <-- change to your extension
+                              recursive = TRUE) {
+  files <- list.files(indir, pattern = pattern, recursive = recursive, full.names = TRUE)
+  if (!length(files)) stop("No files matched regex pattern: ", pattern, " in ", indir)
+  
+  dfs <- lapply(files, read_frag_file)
+  do.call(rbind, dfs)
+}
+
+# get frag lengths
+frag_lengths <- collect_fragments(here("data_out",
+                                       "060_filtered",
+                                       "062_fragment_lengths"), 
+                                  pattern = "\\.txt$")  
+```
+
+Read in FRiP scores. 
+```{r data_in_peaks_frip_scores}
+frip_in <- function(f) {
+  read_table(f,
+             skip = 0, 
+             col_names = T)
+}
+
+frip_scores <- map_dfr(list.files(here("data_out",
+                                       "070_peaks", 
+                                       "072_frip_scores"),
+                                  pattern = "^.*\\.txt$",
+                                  full.names = TRUE), 
+                       frip_in) 
+```
+
+## Total read count (forward and reverse) across preprocessing steps
+
+```{r plot_read_counts}
+read_count_plot <- data.frame(sample = filtered_stats$sample,
+                              merged_reads = merged_fastqc %>% subset(grepl("R1", Sample)) %>% pull(Sequences_1)*2,
+                              trimmed_reads = trimmed_fastqc %>% subset(grepl("R1", Sample)) %>% pull(Sequences_1)*2,
+                              aligned_reads = aligned_stats$`reads mapped and paired`,
+                              deduplicated_reads = deduplicated_stats$`reads mapped and paired`,
+                              filtered_reads = filtered_stats$`reads mapped and paired`) %>%
+  pivot_longer(-sample) %>%
+  mutate(name = factor(name, levels = c("merged_reads", 
+                                        "trimmed_reads",
+                                        "aligned_reads",
+                                        "deduplicated_reads",
+                                        "filtered_reads"))) %>%
+  ggplot(aes(x = name, 
+             y= value/1000000,
+             fill = name)) +
+  geom_col() +
+  geom_hline(yintercept = 10, 
+             color = "#e1235c", 
+             linetype = "dashed", 
+             linewidth = 0.25) +
+  theme_bw() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = -90,
+                                   hjust = 0,
+                                   vjust = 0.5)) +
+  facet_wrap(~sample) +
+  scale_x_discrete(name = "Preprocessing step",
+                   labels = c("Raw", "Trimmed", "Aligned", "Deduplicated", "Filtered")) +
+  scale_y_continuous(name = "Total reads (millions)") +
+  scale_fill_manual(values = c("#00033f",
+                               "#002965",
+                               "#1d4f8b",
+                               "#4375b1",
+                               "#689ad6"))
+ggplotly(read_count_plot)
+```
+
+**Interpretation**: Read counts look good. All samples have >10 million reads after alignment, deduplicate, and quality filtering. All samples pass. 
+
+
+## Distribution of fragment lengths
+
+```{r plot_fragment_lengths}
+tlen_plot <- ggplot(frag_lengths,
+                    aes(x=insert_size,
+                        y = count,
+                        color=sample)) +
+  geom_line() +
+  # geom_smooth(se = FALSE, method = "loess", span = 0.15) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  scale_color_manual(values = c(RColorBrewer::brewer.pal(3, "Greens"),
+                                RColorBrewer::brewer.pal(3, "Oranges"),
+                                RColorBrewer::brewer.pal(3, "Blues"),
+                                RColorBrewer::brewer.pal(3, "Purples"),
+                                RColorBrewer::brewer.pal(3, "Reds"),
+                                RColorBrewer::brewer.pal(3, "Greens"),
+                                RColorBrewer::brewer.pal(3, "Oranges"),
+                                RColorBrewer::brewer.pal(3, "Blues"),
+                                RColorBrewer::brewer.pal(3, "Purples"),
+                                RColorBrewer::brewer.pal(3, "Reds"))) +
+  scale_y_continuous(name = "Count") +
+  scale_x_continuous(name = "Fragment size (bp)")
+
+ggplotly(tlen_plot)
+```
+
+
+**Interpretation**: Most distributions look reasonable. A few are skewed towards smaller fragments. All samples pass based on visual checks. 
+
+## Fraction of Reads in Peaks (FRiP) scores
+
+```{r frip_plot}
+frip_plot <- ggplot(frip_scores,
+                    aes(x = file, 
+                        y = percent)) +
+  geom_col(fill = "#002965") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90, 
+                                   hjust = 0,
+                                   vjust = 0.5)) +
+  scale_x_discrete(name = "Sample") +
+  scale_y_continuous("Fraction of reads in peaks(%)") +
+  geom_hline(yintercept = 10, 
+             color = "#e1235c", 
+             linetype = "dashed", 
+             linewidth = 0.5) +
+  geom_hline(yintercept = 20, 
+             color = "#e1235c", 
+             linetype = "dotted", 
+             linewidth = 0.5) 
+
+ggplotly(frip_plot)
+```
+
+
+**Interpretation**: FRiP >20% considered good and >10% acceptable. Samples ending in 15, 16, and 17 belong to the same control participant and all exhibit FRiP <10%. Discard IGF136815, IGF136816, and IGF136817 from all downstream analyses.  
+
+## Consesus features across all samples
+
+Clustering is based on sample feature (peak) counts across all consensus peaks (identified using all samples except for IGF136815, IGF136816, and IGF136817).
+
+Read in feature count data for all sampla
+```{r data_in_peaks_feature_counts_all}
+# list files and derive sample names
+tsv_files <- list.files(here("data_out",
+                             "070_peaks",
+                             "077_peaks_feature_counts_all"), 
+                        pattern = "*.tsv$", 
+                        full.names = TRUE)
+
+# get sample names from file names
+sample_names <- sub("_feature_counts_all_multicov\\.tsv$", 
+                    "", 
+                    basename(tsv_files))
+
+# read each file, take the last column, and column-bind into one data frame
+features_all <- map_dfc(
+  tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% select(dplyr::last_col())) 
+
+colnames(features_all) <- sample_names 
+
+features_all_clean <- features_all %>%
+  select(-c(IGF136815, IGF136816, IGF136817))
+```
+
+Normalize feature counts and conduct pca
+```{r norm_all_consensus_feature_data}
+dds <- DESeqDataSetFromMatrix(countData = features_all_clean,
+                              colData = meta %>%
+                                subset(!grepl("IGF136815|IGF136816|IGF136817", sample)),
+                              design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs  <- vst(dds, blind = TRUE)                    
+mat <- assay(vs)
+
+pc <- prcomp(t(mat), center = TRUE, scale. = TRUE)
+```
+
+### Percent of variance in feature counts captured by individual PCs
+
+```{r pc_var_plot}
+# get variance in each pc
+pvar <- (pc$sdev^2)/sum(pc$sdev^2) * 100
+
+pca_var_plot <- ggplot(as.data.frame(pvar) %>%
+                         mutate(pc = as.numeric(rownames(.))),
+                       aes(y = pvar, x = pc)) +
+  geom_col(fill = "#002965") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8)) +
+  scale_x_continuous(name = "Principle component") +
+  scale_y_continuous(name = "Variance (%)")
+
+ggplotly(pca_var_plot)
+```
+
+### Percent of variance in features counts attributable to pariticpant variables
+
+```{r variance_plot}
+# create annotated df
+meta_anno <- AnnotatedDataFrame(data =  meta %>%
+                                  subset(!grepl("IGF136815|IGF136816|IGF136817", sample)))
+
+# assign sample names 
+sampleNames(meta_anno) <- filtered_stats %>%
+  subset(!grepl("IGF136815|IGF136816|IGF136817", sample)) %>%
+  pull(sample)
+
+# create expression data set using features and annotated df
+eds <- ExpressionSet(assayData = as.matrix(features_all_clean), phenoData = meta_anno)
+
+# create pvca object for plotting - include all vars
+pvcaObj <- pvcaBatchAssess(eds, c("sex", "celltype", "age", "pmi", "group"), threshold = 0.1)
+
+var_plot <- ggplot(pvcaObj$dat %>%
+                     as.data.frame() %>% 
+                     pivot_longer(everything()) %>%
+                     mutate(name = pvcaObj$label), 
+                   aes(x = reorder(name, -value), 
+                       y = value)) +
+  geom_col(fill = "#002965") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = -90,
+                                   hjust = 0, 
+                                   vjust = 0.5))
+
+ggplotly(var_plot)
+```
+
+### Cell type clustering
+
+```{r celltype_clustering}
+# combine metadata with pcs
+pcs <- data.frame(pc$x[,1:5], 
+                  meta %>%
+                    subset(!grepl("IGF136815|IGF136816|IGF136817", sample)))
+
+celltype_plot <- ggplot(pcs, 
+                        aes(PC1, 
+                            PC2, 
+                            color = celltype, 
+                            shape = group)) +
+  geom_point(size=3,
+             alpha = 0.8) +
+  labs(x=paste0("PC1 (", round(pvar[1],1), "%)"),
+       y=paste0("PC2 (", round(pvar[2],1), "%)")) +
+  theme_bw() +
+  scale_colour_manual(values = c("#00033f", "#e1235c", "#7c91a7"))
+
+ggplotly(celltype_plot)
+```
+
+## Consensus features across cell types
+
+```{r }
+microglia_tsv_files <- list.files(here("data_out",
+                                       "070_peaks",
+                                       "078_peaks_feature_counts_celltype"), 
+                                  pattern = "*microglia*", 
+                                  full.names = TRUE)
+
+oligodendrocyte_tsv_files <- list.files(here("data_out",
+                                             "070_peaks",
+                                             "078_peaks_feature_counts_celltype"), 
+                                        pattern = "*oligodendrocyte*", 
+                                        full.names = TRUE)
+
+neuron_tsv_files <- list.files(here("data_out",
+                                    "070_peaks",
+                                    "078_peaks_feature_counts_celltype"), 
+                               pattern = "*neuron*", 
+                               full.names = TRUE)
+
+features_microglia <- map_dfc(
+  microglia_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+features_oligodendrocyte <- map_dfc(
+  oligodendrocyte_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+features_neuron <- map_dfc(
+  neuron_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = F) %>% 
+    select(dplyr::last_col())) 
+
+colnames(features_microglia) <- sub("_microglia_multicov\\.tsv$", 
+                                    "", 
+                                    basename(microglia_tsv_files))
+
+colnames(features_oligodendrocyte) <- sub("_oligodendrocytes_multicov\\.tsv$", 
+                                          "", 
+                                          basename(oligodendrocyte_tsv_files))
+
+colnames(features_neuron) <- sub("_neuron_multicov\\.tsv$", 
+                                 "", 
+                                 basename(neuron_tsv_files))
+
+# remove low frip samples
+features_microglia_clean <- features_microglia %>%
+  select(!"IGF136817")
+
+features_oligodendrocyte_clean <- features_oligodendrocyte %>%
+  select(!"IGF136816")
+
+features_neuron_clean <- features_neuron %>%
+  select(!"IGF136815")
+```
+
+Normalize microglia feature counts and conduct pca
+```{r norm_microglia_consensus_feature_data}
+dds_microglia <- DESeqDataSetFromMatrix(countData = features_microglia_clean,
+                                        colData = meta %>%
+                                          mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                          subset(sample %in% colnames(features_microglia_clean)),
+                                        design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_microglia  <- vst(dds_microglia, blind = TRUE)                    
+mat_microglia <- assay(vs_microglia)
+
+pc_microglia <- prcomp(t(mat_microglia), center = TRUE, scale. = TRUE)
+```
+
+
+```{r microglia_heat_scree}
+pc_microglia_importance <- (pc_microglia$sdev^2) / sum(pc_microglia$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_microglia_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_microglia_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_microglia$x, pc_microglia_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+
+Normalize oligodendrocyte feature counts and conduct pca
+```{r norm_oligodendrocyte_consensus_feature_data}
+dds_oligodendrocyte <- DESeqDataSetFromMatrix(countData = features_oligodendrocyte_clean,
+                                              colData = meta %>%
+                                                mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                                subset(sample %in% colnames(features_oligodendrocyte_clean)),
+                                              design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_oligodendrocyte  <- vst(dds_oligodendrocyte, blind = TRUE)                    
+mat_oligodendrocyte <- assay(vs_oligodendrocyte)
+
+pc_oligodendrocyte <- prcomp(t(mat_oligodendrocyte), center = TRUE, scale. = TRUE)
+```
+
+
+```{r oligodendrocyte_heat_scree}
+pc_oligodendrocyte_importance <- (pc_oligodendrocyte$sdev^2) / sum(pc_oligodendrocyte$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_oligodendrocyte_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_oligodendrocyte_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_oligodendrocyte$x, pc_oligodendrocyte_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+
+Normalize neuron feature counts and conduct pca
+```{r norm_neuron_consensus_feature_data}
+dds_neuron <- DESeqDataSetFromMatrix(countData = features_neuron_clean,
+                                     colData = meta %>%
+                                       mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+                                       subset(sample %in% colnames(features_neuron_clean)),
+                                     design = ~ 1) 
+
+# peaks with very low counts 
+# dds <- dds[rowSums(counts(dds)) >= 10, ]          
+vs_neuron  <- vst(dds_neuron, blind = TRUE)                    
+mat_neuron <- assay(vs_neuron)
+
+pc_neuron <- prcomp(t(mat_neuron), center = TRUE, scale. = TRUE)
+```
+
+```{r neuron_heat_scree}
+pc_neuron_importance <- (pc_neuron$sdev^2) / sum(pc_neuron$sdev^2)
+
+meta_continuous <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  merge(.,
+        frip_scores %>%
+          select(file, percent),
+        by.x = "sample",
+        by.y = "file") %>%
+  subset(sample %in% colnames(features_neuron_clean)) %>%
+  select(age, pmi, percent) %>%
+  dplyr::rename(frip = percent)
+
+meta_categorical <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(features_neuron_clean)) %>%
+  select(sex, group)
+
+heat_scree_plot(pc_neuron$x, pc_neuron_importance, 8, c(1:8), meta_categorical, meta_continuous)
+```
+
+### Percent of variance in cell type feature counts captured by individual PCs
+
+```{r ceclltype_pc_var_plot}
+# get variance in each pc
+pvar_microglia <- (pc_microglia$sdev^2)/sum(pc_microglia$sdev^2) * 100
+pvar_oligodendrocyte <- (pc_oligodendrocyte$sdev^2)/sum(pc_oligodendrocyte$sdev^2) * 100
+pvar_neuron <- (pc_neuron$sdev^2)/sum(pc_neuron$sdev^2) * 100
+
+pca_var_celltypes_plot <- data.frame(neuron = data.frame(pvar_neuron),
+                                     microglia = data.frame(pvar_microglia),
+                                     oligodendrocyte = data.frame(pvar_oligodendrocyte)) %>%
+  mutate(pc = as.numeric(rownames(.))) %>%
+  pivot_longer(-pc) %>%
+  mutate(name = fct_recode(as.factor(name),
+                           Microglia = "pvar_microglia",
+                           Neurons = "pvar_neuron",
+                           Oligodendrocytes = "pvar_oligodendrocyte")) %>%
+  ggplot(aes(x = as.character(pc), y = value)) +
+  geom_col(fill = "#002965") +
+  theme_bw() +
+  facet_wrap(~name) +
+  scale_y_continuous(name = "Variance (%)") +
+  scale_x_discrete(name = "Principal Component (PC)")
+
+ggplotly( pca_var_celltypes_plot)
+```
+
+
+
+
+
