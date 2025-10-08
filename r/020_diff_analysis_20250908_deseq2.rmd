@@ -155,6 +155,136 @@ neuro_meta <- meta %>%
   subset(sample %in% colnames(neuro_feat_clean))
 ```
 
+## Annotate peaks for each cell type
+
+```{r micro_peak_anno}
+# convert peaks to granges obj
+micro_feat_gr  <- GRanges(seqnames = micro_feat_clean$chr,
+                          ranges   = IRanges(as.numeric(micro_feat_clean$start), 
+                                             as.numeric(micro_feat_clean$end)),
+                          strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(micro_feat_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+micro_feat_anno <- annotatePeak(micro_feat_gr, 
+                                TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                tssRegion=c(-3000,3000), 
+                                annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+micro_feat_clean_anno <- merge(micro_feat_clean,
+                               as.data.frame(micro_feat_anno@anno) %>%
+                                 mutate(chr = str_sub(seqnames, 4, 6)),
+                               by = c("chr", "start", "end"))
+```
+
+```{r oligo_peak_anno}
+# convert peaks to granges obj
+oligo_feat_gr  <- GRanges(seqnames = oligo_feat_clean$chr,
+                          ranges   = IRanges(as.numeric(oligo_feat_clean$start), 
+                                             as.numeric(oligo_feat_clean$end)),
+                          strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(oligo_feat_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+oligo_feat_anno <- annotatePeak(oligo_feat_gr, 
+                                TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                tssRegion=c(-3000,3000), 
+                                annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+oligo_feat_clean_anno <- merge(oligo_feat_clean,
+                               as.data.frame(oligo_feat_anno@anno) %>%
+                                 mutate(chr = str_sub(seqnames, 4, 6)),
+                               by = c("chr", "start", "end"))
+```
+
+```{r neuro_peak_anno}
+# convert peaks to granges obj
+neuro_feat_gr  <- GRanges(seqnames = neuro_feat_clean$chr,
+                          ranges   = IRanges(as.numeric(neuro_feat_clean$start), 
+                                             as.numeric(neuro_feat_clean$end)),
+                          strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(neuro_feat_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+neuro_feat_anno <- annotatePeak(neuro_feat_gr, 
+                                TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                tssRegion=c(-3000,3000), 
+                                annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+neuro_feat_clean_anno <- merge(neuro_feat_clean,
+                               as.data.frame(neuro_feat_anno@anno) %>%
+                                 mutate(chr = str_sub(seqnames, 4, 6)),
+                               by = c("chr", "start", "end"))
+```
+
+## Covariate distributions
+
+```{r covariates}
+sex_plot <- ggplot(neuro_meta, 
+                   aes(x=group, fill = sex)) +
+  geom_bar() +
+  theme_bw()
+sex_plot
+# sex included regardless 
+
+age_plot <- ggplot(neuro_meta, 
+                   aes(x=group,
+                       y = age, 
+                       fill = group)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_bw()
+age_plot
+
+age_ttest <- t.test(age ~ group, data=neuro_meta)
+age_ttest # p = 0.03
+
+agesex_plot <- ggplot(neuro_meta, 
+                   aes(x=sex,
+                       y = age, 
+                       fill = sex)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_bw()
+agesex_plot
+
+agesex_ttest <- t.test(age ~ sex, data=neuro_meta)
+agesex_ttest # p = 0.07064
+
+frip_plot <- ggplot(neuro_meta, 
+                    aes(x=group,
+                        y = frip, 
+                        fill = group)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_bw()
+frip_plot
+
+frip_ttest <- t.test(frip ~ group, data=neuro_meta)
+frip_ttest # p = 0.27
+
+pmi_plot <- ggplot(neuro_meta, 
+                   aes(x=group,
+                       y = pmi, 
+                       fill = group)) +
+  geom_boxplot() +
+  geom_point() +
+  theme_bw()
+pmi_plot
+
+pmi_ttest <- t.test(pmi ~ group, data=neuro_meta)
+pmi_ttest # p = 0.66
+```
+
 ## Surrogate variable analysis (SVA)
 
 Attempt to remove biological and technical variation using surrogate variables (SVs). Use instead of raw metadata to reduce covariates in linear regressions for DESeq2. 
@@ -164,10 +294,10 @@ Attempt to remove biological and technical variation using surrogate variables (
 Calculate surrogate variables (SVs) for microglia.
 ```{r sva_microglia}
 # create model matrix 
-micro_mod = model.matrix(~as.factor(group),
+mod = model.matrix(~as.factor(group),
                          data = micro_meta)
 # create null matrix
-micro_mod0 = model.matrix(~1,
+mod0 = model.matrix(~1,
                           data=micro_meta)
 
 # estimate num svs req
@@ -217,6 +347,18 @@ ggplot(data = micro_corr_long,
             size = 4) 
 ```
 
+```{r micro_sva_scree}
+data.frame(SV = factor(colnames(micro_svobj$sv), levels = colnames(micro_svobj$sv)),
+                 PropVar = prop_var, CumVar = cum_prop)
+ggplot(df, aes(SV, PropVar*100)) +
+  geom_col() +
+  geom_point(aes(y = CumVar*100), size = 2) +
+  geom_line(aes(y = CumVar*100, group = 1)) +
+  labs(y = "% variance (PCA on SVs)", x = "Surrogate variable",
+       title = "Scree plot of SVs (PCA on SV matrix)") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
 
 ### SVA oligodendrocytes 
 
@@ -335,14 +477,20 @@ ggplot(data = neuro_corr_long,
             size = 4) 
 ```
 
+SVs do not adequately capture variation related to age - correct directly for age and sex. 
+
 ## Differential analysis
 
 ### Differential analysis of microglia
 
 ```{r micro_diff_filter}
+# remove sex chromosomes
+micro_feat_clean_noxy <- micro_feat_clean_anno %>%
+  subset(!chr %in% c("X", "Y"))
+
 # separate coordinates and counts
-micro_peak_coords <- micro_feat_clean[, 1:3]
-micro_counts <- as.matrix(micro_feat_clean[, -(1:3)])
+micro_peak_coords <- micro_feat_clean_noxy[, c(1:3,13:27)]
+micro_counts <- as.matrix(micro_feat_clean_noxy[, -c(1:3,13:27)])
 
 # recode group as factor
 # set control as base level
@@ -352,30 +500,27 @@ micro_meta_svs <- micro_meta_svs %>%
 
 # create edgeR dgelist for filtering
 micro_dgelist <- DGEList(counts = micro_counts, 
+                         genes = micro_peak_coords,
                          samples = micro_meta_svs)
 
 # replicate-aware filtering - min count 5 
 micro_keep <- filterByExpr(micro_dgelist, 
                            group = micro_dgelist$samples$group, 
                            min.count = 5,
-                           min.total.count = 50) # smallest group (control) has 4 samples
+                           min.total.count= 50) 
 
-sum(micro_keep)
+sum(micro_keep) # 70270
 
 # remove those with <5 from count and peaks
 micro_peak_coords_clean <- micro_peak_coords[micro_keep, ]
 micro_counts_clean <- micro_counts[micro_keep, ]
-
-# recreate micro dgelist
-micro_dgelist <- DGEList(counts = micro_counts_clean, 
-                         samples = micro_meta_svs)
 ```
 
 ```{r micro_diff_deseq2}
 # make deseq2 object
 micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
                                    colData = micro_meta_svs,
-                                   design = ~ group + sv1)
+                                   design = ~ group + frip)
 
 # diff analysis using deseq2
 micro_dds_diff = DESeq(micro_dds, 
@@ -395,12 +540,12 @@ micro_dds_res = results(micro_dds_diff,
                         altHypothesis = "greaterAbs")
 
 # get result names
-resultsNames(micro_dds_diff)
+# resultsNames(micro_dds_diff)
 
-# fold change shrinkage
-micro_dds_res_shr <- lfcShrink(micro_dds_diff, 
-                               coef = "group_pd_vs_control", 
-                               type = "apeglm")
+# # fold change shrinkage
+# micro_dds_res_shr <- lfcShrink(micro_dds_diff, 
+#                                coef = "group_pd_vs_control", 
+#                                type = "apeglm")
 
 # make results df
 micro_dds_res_df <- data.frame(chr = micro_peak_coords_clean$chr,
@@ -409,91 +554,22 @@ micro_dds_res_df <- data.frame(chr = micro_peak_coords_clean$chr,
                                baseMean = micro_dds_res$baseMean,
                                lfc = micro_dds_res$log2FoldChange,
                                lfcSE = micro_dds_res$lfcSE,
-                               lfc_shr = micro_dds_res_shr$log2FoldChange,
+                              # lfc_shr = micro_dds_res_shr$log2FoldChange,
                                stat = micro_dds_res$stat,
                                pvalue = micro_dds_res$pvalue,
                                padj = micro_dds_res$padj) 
 
 # get only sig hyper acetylated peaks
 micro_dds_res_df_hyper <- micro_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0)
+  subset(padj < 0.05 & lfc > 1.5)
 
 dim(micro_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
 micro_dds_res_df_hypo <- micro_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0)
+  subset(padj < 0.05 & lfc < -1.5)
 
 nrow(micro_dds_res_df_hypo)
-```
-
-```{r micro_diff_edger}
-# edger normalization
-micro_dgelist <- calcNormFactors(micro_dgelist, 
-                                 method = "TMM")
-
-# check sample clustering
-# expect control + pd to cluster separately
-plotMDS(micro_dgelist, method="bcv", col=as.numeric(micro_dgelist$samples$group))
-
-# design matrix
-micro_design <- model.matrix(~ group + sex + age + frip, 
-                             data = micro_dgelist$samples)
-
-# estimate dispersion
-micro_dgelist <- estimateDisp(micro_dgelist, 
-                              micro_design, 
-                              trend.method = "locfit.mixed",
-                              robust = FALSE)
-
-
-plotBCV(micro_dgelist)
-
-# # fit traditional GLM model (no quasi likelihood)
-# micro_fit <- glmFit(micro_dgelist,
-#                       micro_design,
-#                       robust = TRUE)
-# 
-# lrt12 <- glmLRT(micro_fit)
-# # test pd vs control
-# 
-# # tob table
-# micro_tt <- topTags(lrt12, n = Inf)$table
-# 
-
-# # fit quasi-likelihood GLM model
-micro_fit <- glmQLFit(micro_dgelist,
-                      micro_design,
-                      robust = FALSE)
-
-# check 
-plotMD(glmQLFTest(micro_fit, coef="grouppd"))
-       
-       
-# get colnames
-micro_cn <- colnames(micro_design)
-
-micro_qlf <- glmQLFTest(micro_fit,
-                        coef = "grouppd")
-
-# tob table
-micro_tt <- topTags(micro_qlf, n = Inf, sort.by = "none")$table
-
-# compute normalized CPM and add mean CPM as a convenience.
-cpm_norm <- cpm(micro_dgelist, normalized.lib.sizes = TRUE)
-mean_cpm <- rowMeans(cpm_norm, na.rm = TRUE)
-
-
-res_df <- data.frame(
-  micro_peak_coords_clean,
-  baseMean_like = mean_cpm,
-  logFC = micro_tt$logFC,
-  logCPM = micro_tt$logCPM,
-  stat = micro_tt$F,
-  pvalue = micro_tt$PValue,
-  padj = micro_tt$FDR,
-  row.names = rownames(micro_tt)
-)
 ```
 
 ```{r micro_qqplot}
@@ -533,7 +609,7 @@ lambda_from_p <- function(p, df = 1, na.rm = TRUE) {
   median(chisq_obs) / qchisq(0.5, df = df)
 }
 
-qq_p_gg(res_df$PValue)
+qq_p_gg(micro_dds_res_df$pvalue)
 lambda_from_p(micro_dds_res_df$pvalue)
 ```
 
@@ -619,9 +695,13 @@ dotplot(micro_hypo_go)
 ### Differential analysis of oligodendrocytes
 
 ```{r oligo_diff_filter}
+# remove sex chromosomes
+oligo_feat_clean_noxy <- oligo_feat_clean_anno %>%
+  subset(!chr %in% c("X", "Y"))
+
 # separate coordinates and counts
-oligo_peak_coords <- oligo_feat_clean[, 1:3]
-oligo_counts <- as.matrix(oligo_feat_clean[, -(1:3)])
+oligo_peak_coords <- oligo_feat_clean_noxy[, c(1:3, 13:27)]
+oligo_counts <- as.matrix(oligo_feat_clean_noxy[, -c(1:3, 13:27)])
 
 # recode group as factor
 # set control as base level
@@ -639,20 +719,18 @@ oligo_keep <- filterByExpr(oligo_dgelist,
                            min.count = 5, 
                            min.total.count=50) # smallest group (control) has 4 samples
 
+sum(oligo_keep) # 76711
+
 # remove those with <5 from count and peaks
 oligo_peak_coords_clean <- oligo_peak_coords[oligo_keep, ]
 oligo_counts_clean <- oligo_counts[oligo_keep, ]
-
-# recreate oligo dgelist
-oligo_dgelist <- DGEList(counts = oligo_counts_clean, 
-                         samples = oligo_meta_svs)
 ```
 
 ```{r oligo_diff_deseq2}
 # make deseq2 object
 oligo_dds = DESeqDataSetFromMatrix(countData = oligo_counts_clean,
                                    colData = oligo_meta_svs,
-                                   design = ~ group + sv1)
+                                   design = ~ frip)
 
 # diff analysis using deseq2
 oligo_dds_diff = DESeq(oligo_dds, 
@@ -672,12 +750,12 @@ oligo_dds_res = results(oligo_dds_diff,
                         altHypothesis = "greaterAbs")
 
 # get result names
-resultsNames(oligo_dds_diff)
+# resultsNames(oligo_dds_diff)
 
-# fold change shrinkage
-oligo_dds_res_shr <- lfcShrink(oligo_dds_diff, 
-                               coef = "group_pd_vs_control", 
-                               type = "apeglm")
+# # fold change shrinkage
+# oligo_dds_res_shr <- lfcShrink(oligo_dds_diff, 
+#                                coef = "group_pd_vs_control", 
+#                                type = "apeglm")
 
 # make results df
 oligo_dds_res_df <- data.frame(chr = oligo_peak_coords_clean$chr,
@@ -686,101 +764,24 @@ oligo_dds_res_df <- data.frame(chr = oligo_peak_coords_clean$chr,
                                baseMean = oligo_dds_res$baseMean,
                                lfc = oligo_dds_res$log2FoldChange,
                                lfcSE = oligo_dds_res$lfcSE,
-                               lfc_shr = oligo_dds_res_shr$log2FoldChange,
+                              # lfc_shr = oligo_dds_res_shr$log2FoldChange,
                                stat = oligo_dds_res$stat,
                                pvalue = oligo_dds_res$pvalue,
                                padj = oligo_dds_res$padj) 
 
 # get only sig hyper acetylated peaks
 oligo_dds_res_df_hyper <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0)
+  subset(padj < 0.05 & lfc > 1.5)
 
 dim(oligo_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
 oligo_dds_res_df_hypo <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0)
+  subset(padj < 0.05 & lfc < -1.5)
 
 nrow(oligo_dds_res_df_hypo)
 ```
 
-```{r oligo_diff_edger}
-# edger normalization
-oligo_dgelist <- calcNormFactors(oligo_dgelist, 
-                                 method = "TMM")
-
-# check sample clustering
-# expect control + pd to cluster separately
-plotMDS(oligo_dgelist, method="bcv", col=as.numeric(oligo_dgelist$samples$group))
-
-# design matrix
-oligo_design <- model.matrix(~ group + sex + age + frip, 
-                             data = oligo_dgelist$samples)
-
-# estimate dispersion
-oligo_dgelist <- estimateDisp(oligo_dgelist, 
-                              oligo_design, 
-                              trend.method = "locfit.mixed",
-                              robust = FALSE)
-
-
-plotBCV(oligo_dgelist)
-
-# # fit traditional GLM model (no quasi likelihood)
-# oligo_fit <- glmFit(oligo_dgelist,
-#                       oligo_design,
-#                       robust = TRUE)
-# 
-# lrt12 <- glmLRT(oligo_fit)
-# # test pd vs control
-# 
-# # tob table
-# oligo_tt <- topTags(lrt12, n = Inf)$table
-# 
-
-# # fit quasi-likelihood GLM model
-oligo_fit <- glmQLFit(oligo_dgelist,
-                      oligo_design,
-                      robust = FALSE)
-
-# check 
-plotMD(glmQLFTest(oligo_fit, coef="grouppd"))
-       
-       
-# get colnames
-oligo_cn <- colnames(oligo_design)
-
-oligo_qlf <- glmQLFTest(oligo_fit,
-                        coef = "grouppd")
-
-# tob table
-oligo_tt <- topTags(oligo_qlf, n = Inf)$table
-
-# compute normalized CPM and add mean CPM as a convenience.
-cpm_norm <- cpm(oligo_dgelist, normalized.lib.sizes = TRUE)
-mean_cpm <- rowMeans(cpm_norm, na.rm = TRUE)
-
-
-res_df <- data.frame(
-  oligo_peak_coords_clean,
-  baseMean_like = mean_cpm,
-  logFC = oligo_tt$logFC,
-  logCPM = oligo_tt$logCPM,
-  stat = oligo_tt$F,
-  pvalue = oligo_tt$PValue,
-  padj = oligo_tt$FDR,
-  row.names = rownames(oligo_tt)
-)
-
-
-# get only sig hyper acetylated peaks
-oligo_dds_res_df_hyper <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0)
-
-# get only sig hypoacetylated peaks
-oligo_dds_res_df_hypo <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0)
-```
 
 ```{r oligo_qqplot}
 qq_p_gg(oligo_dds_res_df$pvalue)
@@ -862,13 +863,13 @@ dotplot(oligo_hypo_go)
 ```
 
 
-
-
-
-
 ### Differential analysis of neuro
 
 ```{r neuro_diff_filter}
+# remove sex chromosomes
+neuro_feat_clean_noxy <- neuro_feat_clean %>%
+  subset(!chr %in% c("X", "Y"))
+
 # separate coordinates and counts
 neuro_peak_coords <- neuro_feat_clean[, 1:3]
 neuro_counts <- as.matrix(neuro_feat_clean[, -(1:3)])
@@ -895,63 +896,8 @@ neuro_counts_clean <- neuro_counts[neuro_keep, ]
 
 # recreate neuro dgelist
 neuro_dgelist <- DGEList(counts = neuro_counts_clean, 
+                         genes = neuro_peak_coords_clean,
                          samples = neuro_meta_svs)
-```
-
-```{r neuro_diff_deseq2}
-# make deseq2 object
-neuro_dds = DESeqDataSetFromMatrix(countData = neuro_counts_clean,
-                                   colData = neuro_meta_svs,
-                                   design = ~ group + sv1)
-
-# diff analysis using deseq2
-neuro_dds_diff = DESeq(neuro_dds, 
-                       test = "Wald", 
-                       fitType = "local",
-                      # reduced = ~ sv1, # lrt only
-                       sfType = "poscounts")
-
-# get normalized peak counts (uses method from DESeq)
-neuro_dds_norm_counts = counts(neuro_dds_diff, 
-                               normalized = TRUE)  
-
-# create results dataframe
-neuro_dds_res = results(neuro_dds_diff, 
-                        pAdjustMethod = "BH",
-                        independentFiltering = FALSE, 
-                        altHypothesis = "greaterAbs")
-
-# get result names
-resultsNames(neuro_dds_diff)
-
-# fold change shrinkage
-neuro_dds_res_shr <- lfcShrink(neuro_dds_diff, 
-                               coef = "group_pd_vs_control", 
-                               type = "apeglm")
-
-# make results df
-neuro_dds_res_df <- data.frame(chr = neuro_peak_coords_clean$chr,
-                               start = neuro_peak_coords_clean$start,
-                               end = neuro_peak_coords_clean$end,
-                               baseMean = neuro_dds_res$baseMean,
-                               lfc = neuro_dds_res$log2FoldChange,
-                               lfcSE = neuro_dds_res$lfcSE,
-                               lfc_shr = neuro_dds_res_shr$log2FoldChange,
-                               stat = neuro_dds_res$stat,
-                               pvalue = neuro_dds_res$pvalue,
-                               padj = neuro_dds_res$padj) 
-
-# get only sig hyper acetylated peaks
-neuro_dds_res_df_hyper <- neuro_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0)
-
-dim(neuro_dds_res_df_hyper)
-
-# get only sig hypoacetylated peaks
-neuro_dds_res_df_hypo <- neuro_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0)
-
-nrow(neuro_dds_res_df_hypo)
 ```
 
 ```{r neuro_diff_edger}
@@ -961,7 +907,9 @@ neuro_dgelist <- calcNormFactors(neuro_dgelist,
 
 # check sample clustering
 # expect control + pd to cluster separately
-plotMDS(neuro_dgelist, method="bcv", col=as.numeric(neuro_dgelist$samples$group))
+plotMDS(neuro_dgelist, 
+        method="bcv", 
+        col=as.numeric(neuro_dgelist$samples$group))
 
 # design matrix
 neuro_design <- model.matrix(~ group + sex + age + frip, 
@@ -971,32 +919,20 @@ neuro_design <- model.matrix(~ group + sex + age + frip,
 neuro_dgelist <- estimateDisp(neuro_dgelist, 
                               neuro_design, 
                               trend.method = "locfit.mixed",
-                              robust = FALSE)
+                              robust = F)
 
 
-plotBCV(neuro_dgelist)
-
-# # fit traditional GLM model (no quasi likelihood)
-# neuro_fit <- glmFit(neuro_dgelist,
-#                       neuro_design,
-#                       robust = TRUE)
-# 
-# lrt12 <- glmLRT(neuro_fit)
-# # test pd vs control
-# 
-# # tob table
-# neuro_tt <- topTags(lrt12, n = Inf)$table
-# 
+#plotBCV(neuro_dgelist)
 
 # # fit quasi-likelihood GLM model
 neuro_fit <- glmQLFit(neuro_dgelist,
                       neuro_design,
-                      robust = FALSE)
+                      robust = F)
 
 # check 
 plotMD(glmQLFTest(neuro_fit, coef="grouppd"))
-       
-       
+
+
 # get colnames
 neuro_cn <- colnames(neuro_design)
 
@@ -1021,7 +957,6 @@ res_df <- data.frame(
   padj = neuro_tt$FDR,
   row.names = rownames(neuro_tt)
 )
-
 ```
 
 ```{r neuro_qqplot}

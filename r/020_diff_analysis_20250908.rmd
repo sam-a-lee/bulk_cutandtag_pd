@@ -1,0 +1,591 @@
+---
+title: "Differential analysis of bulk CUT&Tag data"
+author: "Samantha Lee"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+## Load data 
+
+Load required libraries
+```{r req_libs}
+library(here) # dir calling
+library(tidyverse) # data wrangling
+library(sva) # surrogate variables
+library(DESeq2) # diff analysis
+library(edgeR) # diff analysis 
+library(ChIPseeker) # peak anno
+library(clusterProfiler) # go analysis
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # anno library
+library(org.Hs.eg.db) # human annotation
+```
+
+Read in participant metadata.
+```{r data_in_meta}
+meta <- read.csv(here("resources",
+                      "metadata",
+                      "metadata_participants.csv")) %>%
+  mutate(group = ifelse(grepl("PDC", pid), "control", "pd")) %>%
+  mutate(sample = str_extract(sample, "IGF\\d+"))
+```
+
+Read in FRiP scores. 
+```{r data_in_frip_scores}
+frip_in <- function(f) {
+  read_table(f,
+             skip = 0, 
+             col_names = T)
+}
+
+frip_scores <- map_dfr(list.files(here("data_out",
+                                       "070_peaks", 
+                                       "072_frip_scores"),
+                                  pattern = "^.*\\.txt$",
+                                  full.names = TRUE), 
+                       frip_in) 
+```
+
+Combine metadata with FRiP score.
+```{r combine_meta_frip}
+meta <- merge(meta,
+              frip_scores %>%
+                dplyr::select(file, percent) %>%
+                dplyr::rename("frip" = percent,
+                              "sample" = file),
+              by = "sample")
+```
+
+Read in celltype-specific feature counts.
+```{r data_in_feature_counts}
+micro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*microglia*", 
+                              full.names = TRUE)
+
+oligo_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*oligodendrocyte*", 
+                              full.names = TRUE)
+
+neuro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*neuron*", 
+                              full.names = TRUE)
+
+micro_feat <- purrr::imap_dfc(
+  micro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+
+oligo_feat <- purrr::imap_dfc(
+  oligo_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+neuro_feat <- purrr::imap_dfc(
+  neuro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+colnames(micro_feat) <- c("chr", "start", "end",
+                          sub("_microglia_multicov\\.tsv$", 
+                              "", 
+                              basename(micro_tsv_files)))
+
+colnames(oligo_feat) <- c("chr", "start", "end",
+                          sub("_oligodendrocytes_multicov\\.tsv$", 
+                              "", 
+                              basename(oligo_tsv_files)))
+
+colnames(neuro_feat) <- c("chr", "start", "end",
+                          sub("_neuron_multicov\\.tsv$", 
+                              "", 
+                              basename(neuro_tsv_files)))
+
+# remove low frip samples
+micro_feat_clean <- micro_feat %>%
+  dplyr::select(!"IGF136817")
+
+oligo_feat_clean <- oligo_feat %>%
+  dplyr::select(!"IGF136816")
+
+neuro_feat_clean <- neuro_feat %>%
+  dplyr::select(!"IGF136815")
+
+# remove uneeded files 
+rm(micro_tsv_files,
+   oligo_tsv_files,
+   neuro_tsv_files,
+   micro_feat,
+   oligo_feat,
+   neuro_feat,
+   frip_scores)
+```
+
+Subset metadata for each cell type
+```{r meta_celltype}
+micro_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(micro_feat_clean))
+
+oligo_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(oligo_feat_clean))
+
+neuro_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(neuro_feat_clean))
+```
+
+## Surrogate variable analysis (SVA)
+
+Attempt to remove biological and technical variation using surrogate variables (SVs). Use instead of raw metadata to reduce covariates in linear regressions for DESeq2. 
+
+### SVA microglia 
+
+Calculate surrogate variables (SVs) for microglia.
+```{r sva_microglia}
+# create model matrix 
+micro_mod = model.matrix(~as.factor(group) + pmi,
+                         data = micro_meta)
+# create null matrix
+micro_mod0 = model.matrix(~1,
+                          data=micro_meta)
+
+# estimate num svs req
+#micro_nsv = num.sv(micro_feat_clean[,-c(1:3)],
+#                   micro_mod)
+
+# 1 sv per above but calculate five to see correlations
+micro_svobj = sva(as.matrix(micro_feat_clean[,-c(1:3)]),
+                  micro_mod,
+                  micro_mod0,
+                  n.sv=5)
+```
+
+Examine correlation between microglia SVs and metadata
+```{r micro_sv_meta_corr}
+# bind meta + svs
+micro_meta_svs <- cbind(micro_meta, micro_svobj$sv)
+# rename sv cols
+colnames(micro_meta_svs)[9:13] <- c("sv1", "sv2", "sv3", "sv4", "sv5")
+
+# convert all var to num for corr
+micro_meta_corr <- micro_meta_svs %>%
+  dplyr::select(-c(sample, pid, celltype)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), as.numeric))
+
+micro_corr <- round(cor(micro_meta_corr),2)
+micro_corr_long <- reshape2::melt(micro_corr)
+
+ggplot(data = micro_corr_long, 
+       aes(x=Var1, 
+           y=Var2, 
+           fill=value)) + 
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue",
+                       high = "red",
+                       mid = "white", 
+                       midpoint = 0, 
+                       limit = c(-1,1), 
+                       space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() +
+  geom_text(aes(Var2, 
+                Var1,
+                label = as.character(value)), 
+            color = "black",
+            size = 4) 
+```
+
+
+### SVA oligodendrocytes 
+
+Calculate surrogate variables (SVs) for oligoglia.
+```{r sva_oligoglia}
+# create model matrix 
+oligo_mod = model.matrix(~as.factor(group),
+                         data = oligo_meta)
+# create null matrix
+oligo_mod0 = model.matrix(~1,
+                          data=oligo_meta)
+
+# estimate num svs req
+#oligo_nsv = num.sv(oligo_feat_clean[,-c(1:3)],
+#                   oligo_mod)
+
+# 1 sv per above but calculate five to see correlations
+oligo_svobj = sva(as.matrix(oligo_feat_clean[,-c(1:3)]),
+                  oligo_mod,
+                  oligo_mod0,
+                  n.sv=5)
+```
+
+Examine correlation between oligoglia SVs and metadata
+```{r oligo_sv_meta_corr}
+# bind meta + svs
+oligo_meta_svs <- cbind(oligo_meta, oligo_svobj$sv)
+# rename sv cols
+colnames(oligo_meta_svs)[9:13] <- c("sv1", "sv2", "sv3", "sv4", "sv5")
+
+# convert all var to num for corr
+oligo_meta_corr <- oligo_meta_svs %>%
+  dplyr::select(-c(sample, pid, celltype)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), as.numeric))
+
+oligo_corr <- round(cor(oligo_meta_corr),2)
+oligo_corr_long <- reshape2::melt(oligo_corr)
+
+ggplot(data = oligo_corr_long, 
+       aes(x=Var1, 
+           y=Var2, 
+           fill=value)) + 
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue",
+                       high = "red",
+                       mid = "white", 
+                       midpoint = 0, 
+                       limit = c(-1,1), 
+                       space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() +
+  geom_text(aes(Var2, 
+                Var1,
+                label = as.character(value)), 
+            color = "black",
+            size = 4) 
+```
+
+
+### SVA neurons 
+
+Calculate surrogate variables (SVs) for neuroglia.
+```{r sva_neuroglia}
+# create model matrix 
+neuro_mod = model.matrix(~as.factor(group),
+                         data = neuro_meta)
+# create null matrix
+neuro_mod0 = model.matrix(~1,
+                          data=neuro_meta)
+
+# estimate num svs req
+#neuro_nsv = num.sv(neuro_feat_clean[,-c(1:3)],
+#                   neuro_mod)
+
+# 1 sv per above but calculate five to see correlations
+neuro_svobj = sva(as.matrix(neuro_feat_clean[,-c(1:3)]),
+                  neuro_mod,
+                  neuro_mod0,
+                  n.sv=5)
+```
+
+Examine correlation between neuroglia SVs and metadata
+```{r neuro_sv_meta_corr}
+# bind meta + svs together
+neuro_meta_svs <- cbind(neuro_meta, neuro_svobj$sv)
+# rename sv cols
+colnames(neuro_meta_svs)[9:13] <- c("sv1", "sv2", "sv3", "sv4", "sv5")
+
+# convert all var to num for corr
+neuro_meta_corr <- neuro_meta_svs %>%
+  dplyr::select(-c(sample, pid, celltype)) %>%
+  mutate(across(where(is.character), as.factor)) %>%
+  mutate(across(where(is.factor), as.numeric))
+
+neuro_corr <- round(cor(neuro_meta_corr),2)
+neuro_corr_long <- reshape2::melt(neuro_corr)
+
+ggplot(data = neuro_corr_long, 
+       aes(x=Var1, 
+           y=Var2, 
+           fill=value)) + 
+  geom_tile(color = "white")+
+  scale_fill_gradient2(low = "blue",
+                       high = "red",
+                       mid = "white", 
+                       midpoint = 0, 
+                       limit = c(-1,1), 
+                       space = "Lab", 
+                       name="Pearson\nCorrelation") +
+  theme_minimal() +
+  geom_text(aes(Var2, 
+                Var1,
+                label = as.character(value)), 
+            color = "black",
+            size = 4) 
+```
+
+## Differential analysis
+
+### Differential analysis of microglia
+
+```{r micro_diff_filter}
+# separate coordinates and counts
+micro_peak_coords <- micro_feat_clean[, 1:3]
+micro_counts <- as.matrix(micro_feat_clean[, -(1:3)])
+
+# recode group as factor
+# set control as base level
+micro_meta_svs <- micro_meta_svs %>%
+  mutate(group = relevel(factor(group), 
+                         ref = "control")) 
+
+# create edgeR dgelist for filtering
+micro_dgelist <- DGEList(counts = micro_counts, 
+                         samples = micro_meta_svs)
+
+# replicate-aware filtering - min count 5 
+micro_keep <- filterByExpr(micro_dgelist, 
+                           group = micro_dgelist$samples$group, 
+                           min.count = 5,
+                           min.total.count = 50) 
+
+sum(micro_keep)
+
+# remove those with <5 from count and peaks
+micro_peak_coords_clean <- micro_peak_coords[micro_keep, ]
+micro_counts_clean <- micro_counts[micro_keep, ]
+
+# recreate micro dgelist
+# micro_dgelist <- DGEList(counts = micro_counts_clean, 
+#                          samples = micro_meta_svs)
+```
+
+```{r micro_diff_deseq2}
+# make deseq2 object
+micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
+                                   colData = micro_meta_svs,
+                                   design = ~ group + sex + age + frip)
+
+# diff analysis using deseq2
+micro_dds_diff = DESeq(micro_dds, 
+                       test = "Wald", 
+                       fitType = "local",
+                      # reduced = ~ sv1, # lrt only
+                       sfType = "poscounts")
+
+# get normalized peak counts (uses method from DESeq)
+micro_dds_norm_counts = counts(micro_dds_diff, 
+                               normalized = TRUE)  
+
+# create results dataframe
+micro_dds_res = results(micro_dds_diff, 
+                        pAdjustMethod = "BH",
+                        independentFiltering = FALSE, 
+                        altHypothesis = "greaterAbs")
+
+# get result names
+resultsNames(micro_dds_diff)
+
+# fold change shrinkage
+micro_dds_res_shr <- lfcShrink(micro_dds_diff, 
+                               coef = "group_pd_vs_control", 
+                               type = "apeglm")
+
+# make results df
+micro_dds_res_df <- data.frame(chr = micro_peak_coords_clean$chr,
+                               start = micro_peak_coords_clean$start,
+                               end = micro_peak_coords_clean$end,
+                               baseMean = micro_dds_res$baseMean,
+                               lfc = micro_dds_res$log2FoldChange,
+                               lfcSE = micro_dds_res$lfcSE,
+                              # lfc_shr = micro_dds_res_shr$log2FoldChange,
+                               stat = micro_dds_res$stat,
+                               pvalue = micro_dds_res$pvalue,
+                               padj = micro_dds_res$padj) 
+
+# get only sig hyper acetylated peaks
+micro_dds_res_df_hyper <- micro_dds_res_df %>%
+  subset(padj < 0.05 & lfc > 0)
+
+dim(micro_dds_res_df_hyper)
+
+# get only sig hypoacetylated peaks
+micro_dds_res_df_hypo <- micro_dds_res_df %>%
+  subset(padj < 0.05 & lfc < 0)
+
+nrow(micro_dds_res_df_hypo)
+```
+
+
+```{r micro_qqplot}
+qq_p_gg <- function(p, ci = 0.95) {
+  
+  p <- p[is.finite(p) & !is.na(p)]
+  p[p <= 0] <- .Machine$double.xmin
+  p[p > 1] <- 1
+  
+  o <- sort(p)
+  n <- length(o); i <- seq_len(n)
+  e <- (i - 0.5) / n
+  alpha <- (1 - ci) / 2
+  lo <- qbeta(alpha, i, n - i + 1)
+  hi <- qbeta(1 - alpha, i, n - i + 1)
+  
+  df <- data.frame(
+    exp = -log10(e),
+    obs = -log10(o),
+    lower = -log10(lo),
+    upper = -log10(hi)
+  )
+  
+  ggplot(df, aes(exp, obs)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.15) +
+    geom_abline(intercept = 0, slope = 1, linetype = 2) +
+    geom_point(size = 0.8, alpha = 0.6, color = "#00033f") +
+    coord_equal() +
+    labs(x = "Expected -log10(p)", y = "Observed -log10(p)") +
+    theme_minimal()
+}
+
+lambda_from_p <- function(p, df = 1, na.rm = TRUE) {
+  p <- p[is.finite(p)]
+  if (na.rm) p <- p[!is.na(p)]
+  chisq_obs <- qchisq(1 - p, df = df)
+  median(chisq_obs) / qchisq(0.5, df = df)
+}
+
+qq_p_gg(micro_dds_res_df$pvalue)
+lambda_from_p(micro_dds_res_df$pvalue)
+```
+
+```{r micro_volcano}
+ggplot(micro_dds_res_df, 
+       aes(x = lfc, 
+           y = -log(pvalue))) +
+  geom_point() +
+  theme_bw() 
+```
+
+```{r micro_go_terms_hyper}
+# convert peaks to granges obj
+micro_dds_res_df_hyper_gr <- GRanges(seqnames = micro_dds_res_df_hyper$chr,
+                                     ranges   = IRanges(as.numeric(micro_dds_res_df_hyper$start), 
+                                                        as.numeric(micro_dds_res_df_hyper$end)),
+                                     strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(micro_dds_res_df_hyper_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+micro_dds_res_df_hyper_anno <- annotatePeak(micro_dds_res_df_hyper_gr, 
+                                            TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                            tssRegion=c(-3000,3000), 
+                                            annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+micro_dds_res_df_hyper <- merge(micro_dds_res_df_hyper,
+                                as.data.frame(micro_dds_res_df_hyper_anno@anno) %>%
+                                  mutate(chr = str_sub(seqnames, 4, 6)),
+                                by = c("chr", "start", "end"))
+
+micro_hyper_genes <- unique(na.omit(as.data.frame(micro_dds_res_df_hyper_anno)$ENSEMBL))
+
+micro_hyper_go <- enrichGO(gene=micro_hyper_genes, 
+                           OrgDb=org.Hs.eg.db, 
+                           keyType="ENSEMBL",
+                           ont="BP", 
+                           #pvalueCutoff=0.01, 
+                           qvalueCutoff=0.05)
+dotplot(micro_hyper_go)
+```
+
+```{r micro_go_terms_hypo}
+# convert peaks to granges obj
+micro_dds_res_df_hypo_gr <- GRanges(seqnames = micro_dds_res_df_hypo$chr,
+                                    ranges   = IRanges(as.numeric(micro_dds_res_df_hypo$start), 
+                                                       as.numeric(micro_dds_res_df_hypo$end)),
+                                    strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(micro_dds_res_df_hypo_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+micro_dds_res_df_hypo_anno <- annotatePeak(micro_dds_res_df_hypo_gr, 
+                                           TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                           tssRegion=c(-3000,3000), 
+                                           annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+micro_dds_res_df_hypo <- merge(micro_dds_res_df_hypo,
+                               as.data.frame(micro_dds_res_df_hypo_anno@anno) %>%
+                                 mutate(chr = str_sub(seqnames, 4, 6)),
+                               by = c("chr", "start", "end"))
+
+micro_hypo_genes <- unique(na.omit(as.data.frame(micro_dds_res_df_hypo_anno)$ENSEMBL))
+
+micro_hypo_go <- enrichGO(gene=micro_hypo_genes, 
+                          OrgDb=org.Hs.eg.db, 
+                          keyType="ENSEMBL",
+                          ont="BP", 
+                          #pvalueCutoff=0.01, 
+                          qvalueCutoff=0.05)
+dotplot(micro_hypo_go)
+```
+
+
+
+
+
+
+### Output size factors
+
+```{r size factors}
+# get size factors
+micro_size_factors <- sizeFactors(micro_dds_diff) %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  merge(.,
+        micro_meta_svs %>% 
+          dplyr::select(sample, celltype, group),
+        by.x = "rowname", by.y= "sample")
+
+oligo_size_factors <- sizeFactors(oligo_dds_diff) %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  merge(.,
+        oligo_meta_svs %>% 
+          dplyr::select(sample, celltype, group),
+        by.x = "rowname", by.y= "sample")
+
+neuro_size_factors <- sizeFactors(neuro_dds_diff) %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  merge(.,
+        neuro_meta_svs %>% 
+          dplyr::select(sample, celltype, group),
+        by.x = "rowname", by.y= "sample")
+
+size_factors <- rbind(micro_size_factors,
+                      oligo_size_factors,
+                      neuro_size_factors) %>%
+  as.data.frame() 
+
+write_tsv(size_factors,
+          here("data_out",
+               "080_differential_analysis",
+               "size_factors.tsv"),
+          col_names = FALSE)
+```
+
+
