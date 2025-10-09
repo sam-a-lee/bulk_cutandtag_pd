@@ -294,7 +294,7 @@ Attempt to remove biological and technical variation using surrogate variables (
 Calculate surrogate variables (SVs) for microglia.
 ```{r sva_microglia}
 # create model matrix 
-mod = model.matrix(~as.factor(group),
+mod = model.matrix(~as.factor(group) + frip + sex,
                          data = micro_meta)
 # create null matrix
 mod0 = model.matrix(~1,
@@ -520,7 +520,7 @@ micro_counts_clean <- micro_counts[micro_keep, ]
 # make deseq2 object
 micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
                                    colData = micro_meta_svs,
-                                   design = ~ group + frip)
+                                   design = ~ group + sex + sv1)
 
 # diff analysis using deseq2
 micro_dds_diff = DESeq(micro_dds, 
@@ -730,7 +730,7 @@ oligo_counts_clean <- oligo_counts[oligo_keep, ]
 # make deseq2 object
 oligo_dds = DESeqDataSetFromMatrix(countData = oligo_counts_clean,
                                    colData = oligo_meta_svs,
-                                   design = ~ frip)
+                                   design = ~ group + sex + sv1)
 
 # diff analysis using deseq2
 oligo_dds_diff = DESeq(oligo_dds, 
@@ -900,64 +900,52 @@ neuro_dgelist <- DGEList(counts = neuro_counts_clean,
                          samples = neuro_meta_svs)
 ```
 
-```{r neuro_diff_edger}
-# edger normalization
-neuro_dgelist <- calcNormFactors(neuro_dgelist, 
-                                 method = "TMM")
 
-# check sample clustering
-# expect control + pd to cluster separately
-plotMDS(neuro_dgelist, 
-        method="bcv", 
-        col=as.numeric(neuro_dgelist$samples$group))
+```{r neuro_diff_deseq2}
+# make deseq2 object
+neuro_dds = DESeqDataSetFromMatrix(countData = neuro_counts_clean,
+                                   colData = neuro_meta_svs,
+                                   design = ~ group + sv1 + sv2)
 
-# design matrix
-neuro_design <- model.matrix(~ group + sex + age + frip, 
-                             data = neuro_dgelist$samples)
+# diff analysis using deseq2
+neuro_dds_diff = DESeq(neuro_dds, 
+                       test = "Wald", 
+                       fitType = "local",
+                      # reduced = ~ sv1, # lrt only
+                       sfType = "poscounts")
 
-# estimate dispersion
-neuro_dgelist <- estimateDisp(neuro_dgelist, 
-                              neuro_design, 
-                              trend.method = "locfit.mixed",
-                              robust = F)
+# get normalized peak counts (uses method from DESeq)
+neuro_dds_norm_counts = counts(neuro_dds_diff, 
+                               normalized = TRUE)  
 
+# create results dataframe
+neuro_dds_res = results(neuro_dds_diff, 
+                        pAdjustMethod = "BH",
+                        independentFiltering = FALSE, 
+                        altHypothesis = "greaterAbs")
 
-#plotBCV(neuro_dgelist)
+# get result names
+# resultsNames(neuro_dds_diff)
 
-# # fit quasi-likelihood GLM model
-neuro_fit <- glmQLFit(neuro_dgelist,
-                      neuro_design,
-                      robust = F)
+# # fold change shrinkage
+# neuro_dds_res_shr <- lfcShrink(neuro_dds_diff, 
+#                                coef = "group_pd_vs_control", 
+#                                type = "apeglm")
 
-# check 
-plotMD(glmQLFTest(neuro_fit, coef="grouppd"))
+# make results df
+neuro_dds_res_df <- data.frame(chr = neuro_peak_coords_clean$chr,
+                               start = neuro_peak_coords_clean$start,
+                               end = neuro_peak_coords_clean$end,
+                               baseMean = neuro_dds_res$baseMean,
+                               lfc = neuro_dds_res$log2FoldChange,
+                               lfcSE = neuro_dds_res$lfcSE,
+                              # lfc_shr = neuro_dds_res_shr$log2FoldChange,
+                               stat = neuro_dds_res$stat,
+                               pvalue = neuro_dds_res$pvalue,
+                               padj = neuro_dds_res$padj) 
 
-
-# get colnames
-neuro_cn <- colnames(neuro_design)
-
-neuro_qlf <- glmQLFTest(neuro_fit,
-                        coef = "grouppd")
-
-# tob table
-neuro_tt <- topTags(neuro_qlf, n = Inf)$table
-
-# compute normalized CPM and add mean CPM as a convenience.
-cpm_norm <- cpm(neuro_dgelist, normalized.lib.sizes = TRUE)
-mean_cpm <- rowMeans(cpm_norm, na.rm = TRUE)
-
-
-res_df <- data.frame(
-  neuro_peak_coords_clean,
-  baseMean_like = mean_cpm,
-  logFC = neuro_tt$logFC,
-  logCPM = neuro_tt$logCPM,
-  stat = neuro_tt$F,
-  pvalue = neuro_tt$PValue,
-  padj = neuro_tt$FDR,
-  row.names = rownames(neuro_tt)
-)
 ```
+
 
 ```{r neuro_qqplot}
 qq_p_gg(neuro_dds_res_df$pvalue)
@@ -971,115 +959,3 @@ ggplot(neuro_dds_res_df,
   geom_point() +
   theme_bw() 
 ```
-
-```{r neuro_go_terms_hyper}
-# convert peaks to granges obj
-neuro_dds_res_df_hyper_gr <- GRanges(seqnames = neuro_dds_res_df_hyper$chr,
-                                     ranges   = IRanges(as.numeric(neuro_dds_res_df_hyper$start), 
-                                                        as.numeric(neuro_dds_res_df_hyper$end)),
-                                     strand   = "*")
-
-# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
-seqlevelsStyle(neuro_dds_res_df_hyper_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
-
-# annotate peaks
-neuro_dds_res_df_hyper_anno <- annotatePeak(neuro_dds_res_df_hyper_gr, 
-                                            TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
-                                            tssRegion=c(-3000,3000), 
-                                            annoDb="org.Hs.eg.db")
-
-# merge annotate to res df
-neuro_dds_res_df_hyper <- merge(neuro_dds_res_df_hyper,
-                                as.data.frame(neuro_dds_res_df_hyper_anno@anno) %>%
-                                  mutate(chr = str_sub(seqnames, 4, 6)),
-                                by = c("chr", "start", "end"))
-
-neuro_hyper_genes <- unique(na.omit(as.data.frame(neuro_dds_res_df_hyper_anno)$ENSEMBL))
-
-neuro_hyper_go <- enrichGO(gene=neuro_hyper_genes, 
-                           OrgDb=org.Hs.eg.db, 
-                           keyType="ENSEMBL",
-                           ont="BP", 
-                           #pvalueCutoff=0.01, 
-                           qvalueCutoff=0.05)
-dotplot(neuro_hyper_go)
-```
-
-```{r neuro_go_terms_hypo}
-# convert peaks to granges obj
-neuro_dds_res_df_hypo_gr <- GRanges(seqnames = neuro_dds_res_df_hypo$chr,
-                                    ranges   = IRanges(as.numeric(neuro_dds_res_df_hypo$start), 
-                                                       as.numeric(neuro_dds_res_df_hypo$end)),
-                                    strand   = "*")
-
-# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
-seqlevelsStyle(neuro_dds_res_df_hypo_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
-
-# annotate peaks
-neuro_dds_res_df_hypo_anno <- annotatePeak(neuro_dds_res_df_hypo_gr, 
-                                           TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
-                                           tssRegion=c(-3000,3000), 
-                                           annoDb="org.Hs.eg.db")
-
-# merge annotate to res df
-neuro_dds_res_df_hypo <- merge(neuro_dds_res_df_hypo,
-                               as.data.frame(neuro_dds_res_df_hypo_anno@anno) %>%
-                                 mutate(chr = str_sub(seqnames, 4, 6)),
-                               by = c("chr", "start", "end"))
-
-neuro_hypo_genes <- unique(na.omit(as.data.frame(neuro_dds_res_df_hypo_anno)$ENSEMBL))
-
-neuro_hypo_go <- enrichGO(gene=neuro_hypo_genes, 
-                          OrgDb=org.Hs.eg.db, 
-                          keyType="ENSEMBL",
-                          ont="BP", 
-                          #pvalueCutoff=0.01, 
-                          qvalueCutoff=0.05)
-dotplot(neuro_hypo_go)
-```
-
-
-
-
-
-### Output size factors
-
-```{r size factors}
-# get size factors
-micro_size_factors <- sizeFactors(micro_dds_diff) %>%
-  as.data.frame() %>%
-  rownames_to_column() %>%
-  merge(.,
-        micro_meta_svs %>% 
-          dplyr::select(sample, celltype, group),
-        by.x = "rowname", by.y= "sample")
-
-oligo_size_factors <- sizeFactors(oligo_dds_diff) %>%
-  as.data.frame() %>%
-  rownames_to_column() %>%
-  merge(.,
-        oligo_meta_svs %>% 
-          dplyr::select(sample, celltype, group),
-        by.x = "rowname", by.y= "sample")
-
-neuro_size_factors <- sizeFactors(neuro_dds_diff) %>%
-  as.data.frame() %>%
-  rownames_to_column() %>%
-  merge(.,
-        neuro_meta_svs %>% 
-          dplyr::select(sample, celltype, group),
-        by.x = "rowname", by.y= "sample")
-
-size_factors <- rbind(micro_size_factors,
-                      oligo_size_factors,
-                      neuro_size_factors) %>%
-  as.data.frame() 
-
-write_tsv(size_factors,
-          here("data_out",
-               "080_differential_analysis",
-               "size_factors.tsv"),
-          col_names = FALSE)
-```
-
-

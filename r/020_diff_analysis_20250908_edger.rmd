@@ -231,8 +231,9 @@ neuro_feat_clean_anno <- merge(neuro_feat_clean,
 ```{r covariates}
 sex_plot <- ggplot(neuro_meta, 
                    aes(x=group, fill = sex)) +
-  geom_bar() +
-  theme_bw()
+  geom_bar(alpha = 0.8) +
+  theme_bw() +
+  scale_fill_manual(values = c("#e1235c","#002b5d"))
 sex_plot
 # sex included regardless 
 
@@ -240,13 +241,30 @@ age_plot <- ggplot(neuro_meta,
                    aes(x=group,
                        y = age, 
                        fill = group)) +
-  geom_boxplot() +
+  geom_boxplot(alpha = 0.8) +
   geom_point() +
-  theme_bw()
+  theme_bw() +
+  scale_fill_manual(values = c("#e1235c","#002b5d"))
 age_plot
 
 age_ttest <- t.test(age ~ group, data=neuro_meta)
 age_ttest # p = 0.03
+
+
+agesex_plot <- ggplot(neuro_meta, 
+                   aes(x=sex,
+                       y = age, 
+                       fill = sex)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  scale_fill_manual(values = c("#e1235c","#002b5d")) +
+  facet_wrap(~group)
+agesex_plot
+
+age_ttest <- t.test(age ~ group, data=neuro_meta)
+age_ttest # p = 0.03
+
 
 frip_plot <- ggplot(neuro_meta, 
                     aes(x=group,
@@ -282,7 +300,7 @@ Attempt to remove biological and technical variation using surrogate variables (
 Calculate surrogate variables (SVs) for microglia.
 ```{r sva_microglia}
 # create model matrix 
-micro_mod = model.matrix(~as.factor(group),
+micro_mod = model.matrix(~as.factor(group) + frip,
                          data = micro_meta)
 # create null matrix
 micro_mod0 = model.matrix(~1,
@@ -497,7 +515,52 @@ micro_dgelist <- DGEList(counts = micro_counts_clean,
                          samples = micro_meta_svs)
 ```
 
-```{r micro_diff_edger}
+```{r residualize_age}
+
+# in your sample metadata 'samp'
+micro_meta_svs$age_resid <- resid(lm(age ~ sex, data = micro_meta_svs))  # center/scale age first
+
+# edgeR (preferred at tiny n)
+library(splines)
+design <- model.matrix(~ group + sex + ns(age_resid, df=2), data = samp)
+
+
+micro_dgelist <- DGEList(counts = micro_counts_clean, 
+                         genes = micro_peak_coords_clean,
+                         samples = micro_meta_svs)
+
+```
+
+```{r offset_age_sex}
+
+# 1) Fit nuisance-only model
+fit0 <- edgeR::glmFit(y, model.matrix(~ sex + ns(age,2), samples))
+mu0  <- fit0$fitted.values
+
+# 2) Refit with group and offset = log(mu0)
+design1 <- model.matrix(~ group, samples)
+y$offset <- log(mu0)  # add to any existing offsets from library sizes
+fit1 <- edgeR::glmQLFit(y, design1, robust=TRUE)
+res  <- edgeR::glmQLFTest(fit1, coef="groupPD")
+
+
+
+# 1) Fit nuisance-only model
+fit0 <- edgeR::glmFit(micro_dgelist, model.matrix(~ sex + age_resid,micro_meta_svs))
+mu0  <- fit0$fitted.values
+
+# 2) Refit with group and offset = log(mu0)
+design1 <- model.matrix(~ group, micro_meta_svs)
+micro_dgelist$offset <- log(mu0)  # add to any existing offsets from library sizes
+fit1 <- edgeR::glmQLFit(micro_dgelist, design1, robust=TRUE)
+res  <- edgeR::glmQLFTest(fit1, coef="grouppd")
+
+micro_tt <- topTags(res, 
+                    n = Inf, 
+                    sort.by = "none")$table
+```
+
+```{r micro_diff_edger_group}
 # edger normalization
 micro_dgelist <- calcNormFactors(micro_dgelist, 
                                  method = "TMM")
@@ -509,7 +572,7 @@ micro_dgelist <- calcNormFactors(micro_dgelist,
 #         col=as.numeric(micro_dgelist$samples$group))
 
 # design matrix=
-micro_design <- model.matrix(~ group + sv1 + sv2 + sv3, 
+micro_design <- model.matrix(~ group + sv1, 
                              data = micro_dgelist$samples)
 
 # estimate dispersion
@@ -553,7 +616,7 @@ micro_res_df <- data.frame(
   baseMean_like = mean_cpm,
   logFC = micro_tt$logFC,
   logCPM = micro_tt$logCPM,
-  stat = micro_tt$F,
+  stat = micro_tt$`F`,
   pvalue = micro_tt$PValue,
   padj = micro_tt$FDR,
   row.names = rownames(micro_tt)
@@ -731,7 +794,7 @@ oligo_dgelist <- calcNormFactors(oligo_dgelist,
 #         col=as.numeric(oligo_dgelist$samples$group))
 
 # design matrix
-oligo_design <- model.matrix(~ group + sv1 + sv2 + sv3, 
+oligo_design <- model.matrix(~ group, 
                              data = oligo_dgelist$samples)
 
 # estimate dispersion
