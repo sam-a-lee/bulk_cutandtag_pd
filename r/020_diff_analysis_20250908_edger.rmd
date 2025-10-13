@@ -488,14 +488,14 @@ micro_counts <- as.matrix(micro_feat_clean_noxy[, -c(1:3,13:27)])
 
 # recode group as factor
 # set control as base level
-micro_meta_svs <- micro_meta_svs %>%
+micro_meta_svs <- micro_meta %>%
   mutate(group = relevel(factor(group), 
                          ref = "control")) 
 
 # create edgeR dgelist for filtering
 micro_dgelist <- DGEList(counts = micro_counts, 
                          genes = micro_peak_coords,
-                         samples = micro_meta_svs)
+                         samples = micro_meta)
 
 # replicate-aware filtering - min count 5 
 micro_keep <- filterByExpr(micro_dgelist, 
@@ -512,53 +512,9 @@ micro_counts_clean <- micro_counts[micro_keep, ]
 # recreate micro dgelist with clean counts
 micro_dgelist <- DGEList(counts = micro_counts_clean, 
                          genes = micro_peak_coords_clean,
-                         samples = micro_meta_svs)
+                         samples = micro_meta)
 ```
 
-```{r residualize_age}
-
-# in your sample metadata 'samp'
-micro_meta_svs$age_resid <- resid(lm(age ~ sex, data = micro_meta_svs))  # center/scale age first
-
-# edgeR (preferred at tiny n)
-library(splines)
-design <- model.matrix(~ group + sex + ns(age_resid, df=2), data = samp)
-
-
-micro_dgelist <- DGEList(counts = micro_counts_clean, 
-                         genes = micro_peak_coords_clean,
-                         samples = micro_meta_svs)
-
-```
-
-```{r offset_age_sex}
-
-# 1) Fit nuisance-only model
-fit0 <- edgeR::glmFit(y, model.matrix(~ sex + ns(age,2), samples))
-mu0  <- fit0$fitted.values
-
-# 2) Refit with group and offset = log(mu0)
-design1 <- model.matrix(~ group, samples)
-y$offset <- log(mu0)  # add to any existing offsets from library sizes
-fit1 <- edgeR::glmQLFit(y, design1, robust=TRUE)
-res  <- edgeR::glmQLFTest(fit1, coef="groupPD")
-
-
-
-# 1) Fit nuisance-only model
-fit0 <- edgeR::glmFit(micro_dgelist, model.matrix(~ sex + age_resid,micro_meta_svs))
-mu0  <- fit0$fitted.values
-
-# 2) Refit with group and offset = log(mu0)
-design1 <- model.matrix(~ group, micro_meta_svs)
-micro_dgelist$offset <- log(mu0)  # add to any existing offsets from library sizes
-fit1 <- edgeR::glmQLFit(micro_dgelist, design1, robust=TRUE)
-res  <- edgeR::glmQLFTest(fit1, coef="grouppd")
-
-micro_tt <- topTags(res, 
-                    n = Inf, 
-                    sort.by = "none")$table
-```
 
 ```{r micro_diff_edger_group}
 # edger normalization
@@ -572,7 +528,7 @@ micro_dgelist <- calcNormFactors(micro_dgelist,
 #         col=as.numeric(micro_dgelist$samples$group))
 
 # design matrix=
-micro_design <- model.matrix(~ group + sv1, 
+micro_design <- model.matrix(~ group + sex + pmi, 
                              data = micro_dgelist$samples)
 
 # estimate dispersion
@@ -671,6 +627,143 @@ ggplot(micro_res_df,
   geom_point() +
   theme_bw() 
 ```
+
+
+```{r vis_top_peak_hyper}
+library(GenomicRanges)
+library(rtracklayer)
+library(biomaRt)
+library(Gviz)
+
+# paths to  data to import
+micro_control_bw <- "/Users/samanthalee/Documents/bulk_cutandtag_pd/data_out/070_peaks/079_bigwigs/microglia/microglia_control_mean_CPM.bw"
+
+micro_pd_bw <- "/Users/samanthalee/Documents/bulk_cutandtag_pd/data_out/070_peaks/079_bigwigs/microglia/microglia_pd_mean_CPM.bw"
+
+micro_peaks <- "/Users/samanthalee/Documents/bulk_cutandtag_pd/data_out/070_peaks/079_bigwigs/microglia/consensus_microglia_macs3_q_0_00001_peaks.narrowPeak"
+
+# import data
+peaks <- import(micro_peaks)
+ctl_bw <- import(micro_control_bw, format="BigWig")
+dis_bw <- import(micro_pd_bw, format="BigWig")
+
+# harmonize naming to ucsc
+seqlevelsStyle(peaks) <- "NCBI"
+seqlevelsStyle(ctl_bw) <- "NCBI"
+seqlevelsStyle(dis_bw) <- "NCBI"
+
+# Keep only standard chromosomes (drops KI/GL/KN scaffolds etc.)
+peaks <- keepStandardChromosomes(peaks, pruning.mode = "coarse")
+ctl_bw   <- keepStandardChromosomes(ctl_bw,   pruning.mode = "coarse")
+dis_bw   <- keepStandardChromosomes(dis_bw,   pruning.mode = "coarse")
+
+# use peak summits if your BED is peak centers; otherwise keep as is
+peaks <- resize(peaks, fix="center", width=1)  
+
+# window around peaks (e.g., +/- 3kb)
+upstream  <- 3000
+downstream<- 3000
+target_width <- upstream + downstream + 1  # +1 to include center base
+
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 9
+start <- 12780191
+end   <- 12790178
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+grt <- BiomartGeneRegionTrack(
+  chromosome= chrom,
+  start = start,
+  end = end,
+  genome = gen,
+  name        = "Ensembl (HGNC symbols)",
+  biomart     = mart
+)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+# ---- signal tracks (BigWig) ----
+# Tip: You can also use type="h" (horizon), "histogram", or "p" (points). Histogram is nice for CPM.
+control_tr <- DataTrack(
+  range       = ctl_bw,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="darkblue",
+  fill.histogram="darkblue",
+  name        = "Control (CPM)",
+)
+
+pd_tr <- DataTrack(
+  range       = dis_bw,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="darkred", 
+  fill.histogram="darkred",
+  name        = "Disease (CPM)"
+)
+
+
+# --- define the differential peak span ---
+peak_start <- 12784191
+peak_end   <- 12786178
+
+
+
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+# Make the boxed AnnotationTrack
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# 4) Plot (put genes between axis and signal if you like)
+plotTracks(list(ax, grt, pd_tr, control_tr, diff_tr),
+           chromosome = chrom, from = start, to = end,
+           background.title = "white", col.title = "black")
+```
+
 
 ```{r micro_go_terms_hyper}
 # convert peaks to granges obj
