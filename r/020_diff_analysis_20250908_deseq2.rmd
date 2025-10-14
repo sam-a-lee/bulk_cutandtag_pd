@@ -27,6 +27,9 @@ library(clusterProfiler) # go analysis
 library(TxDb.Hsapiens.UCSC.hg38.knownGene) # anno library
 library(org.Hs.eg.db) # human annotation
 library(Gviz) # ucsc track vis
+library(GenomicRanges)
+library(rtracklayer)
+library(biomaRt)
 ```
 
 Source required custom function
@@ -34,6 +37,60 @@ Source required custom function
 # qqplot and lambda
 source(here("r",
             "qqplot.r"))
+```
+
+Read in toptables from age analysis of healthy AD controls (from Paulina) and subset statistically significant (BH p < 0.05) hits. Convert to GRanges object. 
+```{r data_in_age_tt}
+micro_age <- read.csv(here("resources",
+                           "age_assoc_peaks",
+                           "IRF8_mergebam_peaks_all_deouts_ageContinuous.csv"))
+
+micro_age_sig <- micro_age %>%
+  subset(padj_BH < 0.05) %>%
+  mutate(chr = str_split_i(peakName, pattern = "[.]", i=1),
+         start = str_split_i(peakName, pattern = "[.]", i=2),
+         end = str_split_i(peakName, pattern = "[.]", i=3)) %>% 
+  dplyr::select(-peakName)
+
+micro_age_sig_gr <-  makeGRangesFromDataFrame(micro_age_sig,
+                                              keep.extra.columns = TRUE,
+                                              seqnames.field = "chr",
+                                              start.field = "start",
+                                              end.field = "end")
+
+oligo_age <- read.csv(here("resources",
+                           "age_assoc_peaks",
+                           "SOX10_mergebam_peaks_all_deouts_ageContinuous.csv"))
+
+oligo_age_sig <- oligo_age %>%
+  subset(padj_BH < 0.05) %>%
+  mutate(chr = str_split_i(peakName, pattern = "[.]", i=1),
+         start = str_split_i(peakName, pattern = "[.]", i=2),
+         end = str_split_i(peakName, pattern = "[.]", i=3)) %>% 
+  dplyr::select(-peakName)
+
+oligo_age_sig_gr <-  makeGRangesFromDataFrame(oligo_age_sig,
+                                              keep.extra.columns = TRUE,
+                                              seqnames.field = "chr",
+                                              start.field = "start",
+                                              end.field = "end")
+
+neuro_age <- read.csv(here("resources",
+                           "age_assoc_peaks",
+                           "NeuN_mergebam_peaks_all_deouts_ageContinuous.csv"))
+
+neuro_age_sig <- neuro_age %>%
+  subset(padj_BH < 0.05) %>%
+  mutate(chr = str_split_i(peakName, pattern = "[.]", i=1),
+         start = str_split_i(peakName, pattern = "[.]", i=2),
+         end = str_split_i(peakName, pattern = "[.]", i=3)) %>% 
+  dplyr::select(-peakName)
+
+neuro_age_sig_gr <-  makeGRangesFromDataFrame(neuro_age_sig,
+                                              keep.extra.columns = TRUE,
+                                              seqnames.field = "chr",
+                                              start.field = "start",
+                                              end.field = "end")
 ```
 
 Read in participant metadata.
@@ -332,8 +389,6 @@ ggplot(data = corr_long,
 ### Differential analysis of microglia
 
 ```{r micro_diff_filter}
-
-micro_meta$pmi_centered <- scale(micro_meta$pmi, scale = F, center = T)
 # remove sex chromosomes
 micro_feat_clean_noxy <- micro_feat_clean_anno %>%
   subset(!chr %in% c("X", "Y"))
@@ -367,12 +422,14 @@ micro_counts_clean <- micro_counts[micro_keep, ]
 ```
 
 ```{r micro_diff_deseq2}
-
 # make deseq2 object
 # levels of h3k27ac decrease as soon as 24 PMI (https://pmc.ncbi.nlm.nih.gov/articles/PMC6330433/)
 micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
-                                   colData = micro_meta,
-                                   design = ~ group + sex + pmi_centered)
+                                   colData = micro_meta %>%
+                                     mutate(pmi_c = scale(pmi, 
+                                                          scale = F, 
+                                                          center = T)),
+                                   design = ~ group + sex + pmi_c)
 
 # diff analysis using deseq2
 micro_dds_diff = DESeq(micro_dds, 
@@ -393,33 +450,51 @@ micro_dds_res = results(micro_dds_diff,
 
 # get result names
 # resultsNames(micro_dds_diff)
-
-# # fold change shrinkage
-micro_dds_res_shr <- lfcShrink(micro_dds_diff, 
-                                coef = "group_pd_vs_control", 
-                               type = "apeglm")
+# 
+# # # fold change shrinkage
+# micro_dds_res_shr <- lfcShrink(micro_dds_diff, 
+#                                 coef = "group_pd_vs_control", 
+#                                type = "apeglm")
 
 # make results df
 micro_dds_res_df <- data.frame(baseMean = micro_dds_res$baseMean,
                                lfc = micro_dds_res$log2FoldChange,
                                lfcSE = micro_dds_res$lfcSE,
-                               lfc_shr = micro_dds_res_shr$log2FoldChange,
+                               #lfc_shr = micro_dds_res_shr$log2FoldChange,
                                stat = micro_dds_res$stat,
                                pvalue = micro_dds_res$pvalue,
                                padj = micro_dds_res$padj,
-                               micro_peak_coords_clean) 
+                               micro_peak_coords_clean, 
+                               micro_dds_norm_counts) 
+```
 
+Remove age associated regions from micro pd data
+```{r micro_rm_age}
+# convert results ot gr object
+micro_dds_gr <-  makeGRangesFromDataFrame(micro_dds_res_df %>%
+                                            dplyr::select(-any_of(c("seqnames", "ranges", "strand", "seqlevels", "seqlengths", "isCircular", 
+                                                                    "width", "element"))),
+                                          keep.extra.columns = TRUE,
+                                          seqnames.field = "chr",
+                                          start.field = "start",
+                                          end.field = "end")
+
+# find overlaps with age tt
+micro_overlaps <- findOverlaps(micro_dds_gr, 
+                               micro_age_sig_gr, 
+                               ignore.strand = TRUE) 
+# no overlaps
+```
+```{r subset_micro_hyper_hypo}
 # get only sig hyper acetylated peaks
 micro_dds_res_df_hyper <- micro_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0) %>%
-  subset((lfc > 0 & lfc_shr > 0))
+  subset(padj < 0.05 & lfc > 0) 
 
-dim(micro_dds_res_df_hyper)
+nrow(micro_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
 micro_dds_res_df_hypo <- micro_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0) %>%
-  subset((lfc < 0 & lfc_shr <0))
+  subset(padj < 0.05 & lfc < 0) 
 
 nrow(micro_dds_res_df_hypo)
 ```
@@ -430,11 +505,38 @@ lambda_from_p(micro_dds_res_df$pvalue)
 ```
 
 ```{r micro_volcano}
-ggplot(micro_dds_res_df, 
-       aes(x = lfc, 
-           y = -log(pvalue))) +
-  geom_point() +
-  theme_bw() 
+micro_ggplot <- ggplot(micro_dds_res_df, 
+                       aes(x = lfc, 
+                           y = -log(pvalue),
+                           color = ifelse(padj < 0.05,"FDR<0.05", "FDR≥0.05"))) +
+  geom_point(alpha = 0.8,
+             size = 1) +
+  theme_bw() +
+  scale_color_manual(values = c("#e1235c", "#00326e"),
+                     name = "Significance") +
+  scale_y_continuous(name = "-log(unadjusted p-value)") +
+  scale_x_continuous(name = "log(fold-change)") +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 6), 
+        legend.key.height = unit(0.25, "cm"),
+        legend.key.width = unit(0.25, "cm"),
+        legend.position = "none") +
+  ggrepel::geom_text_repel(data = micro_dds_res_df %>% 
+                             arrange(padj) %>% 
+                             slice_head(n=10),
+                           aes(label = SYMBOL,),
+                           max.overlaps = 100,
+                           box.padding = 0.4, 
+                           min.segment.length = unit(0, 'lines'),
+                           color = "black", 
+                           size = 2.5) 
+
+ggsave(micro_ggplot, 
+       filename = here("figures",
+                       "20251014_micro_ggplot.png"),
+       height = 8, width = 8, units = "cm", dpi = 600)
 ```
 
 ```{r vis_top_peak_hyper}
@@ -535,7 +637,108 @@ plotTracks(list(ax, grt, pd_tr, control_tr, diff_tr),
            background.title = "white", col.title = "black")
 ```
 
+```{r micro_recap_rat_rotenone}
+# bcl 
+micro_bcl <- micro_dds_res_df %>% 
+  subset(SYMBOL == "BCL3") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., micro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", nrow = 1) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
 
+ggsave(micro_bcl, filename = here("figures", "20251014_micro_bcl3.png"),
+       height = 5, width = 20, units = "cm", dpi = 600)
+
+# mat2b 
+micro_mat2b <- micro_dds_res_df %>% 
+  subset(SYMBOL == "MAT2B") %>%
+  subset(grepl("Distal Intergenic", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., micro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(micro_mat2b, filename = here("figures", "20251014_micro_mat2b.png"),
+       height = 5, width = 5, units = "cm", dpi = 600)
+
+# hif3a 
+micro_hif3a <- micro_dds_res_df %>% 
+  subset(SYMBOL == "HIF3A") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., micro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(micro_hif3a, filename = here("figures", "20251014_micro_hif3a.png"),
+       height = 5, width = 12, units = "cm", dpi = 600)
+
+# olfm4 
+micro_olfm4 <- micro_dds_res_df %>% 
+  subset(SYMBOL == "OLFM4") %>%
+  #subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., micro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", nrow = 1) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(micro_olfm4, filename = here("figures", "20251014_micro_olfm4.png"),
+       height = 5, width = 25, units = "cm", dpi = 600)
+
+```
 
 ```{r vis_top_peak_hypo}
 # region (use NCBI-style chr names for hg38)
@@ -569,12 +772,11 @@ grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
 displayPars(grt) <- list(
   transcriptAnnotation = "symbol",  # show HGNC symbols
   geneSymbol = TRUE,
-  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  collapseTranscripts = "meta",     
   fontsize = 10
 )
 
-# ---- signal tracks (BigWig) ----
-# Tip: You can also use type="h" (horizon), "histogram", or "p" (points). Histogram is nice for CPM.
+# signal trakcs
 control_tr <- DataTrack(
   range       = ctl_bw,
   genome      = gen,
@@ -596,12 +798,11 @@ pd_tr <- DataTrack(
 )
 
 
-# --- define the differential peak span ---
+# define the differential peak span 
 peak_start <- 31802734
 peak_end   <- 31809119
 
-
-# Build a clean GRanges with an 'id' column (character, length == n features)
+# Build a clean GRanges with an 'id' column 
 diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
 mcols(diff_peak)$id <- NA  # label to display
 
@@ -629,7 +830,7 @@ displayPars(diff_tr) <- c(
   )
 )
 
-# 4) Plot (put genes between axis and signal if you like)
+# plot tracks t
 plotTracks(list(ax, grt, pd_tr, control_tr, diff_tr),
            chromosome = chrom, from = start, to = end,
            background.title = "white", col.title = "black")
@@ -664,8 +865,8 @@ micro_hyper_go <- enrichGO(gene=micro_hyper_genes,
                            OrgDb=org.Hs.eg.db, 
                            keyType="ENSEMBL",
                            ont="BP", 
-                           #pvalueCutoff=0.01, 
-                           qvalueCutoff=0.05)
+                           #pvalueCutoff=0.05, 
+                           qvalueCutoff = 0.5)
 dotplot(micro_hyper_go)
 ```
 
@@ -741,8 +942,9 @@ oligo_counts_clean <- oligo_counts[oligo_keep, ]
 ```{r oligo_diff_deseq2}
 # make deseq2 object
 oligo_dds = DESeqDataSetFromMatrix(countData = oligo_counts_clean,
-                                   colData = oligo_meta,
-                                   design = ~ group + sex + pmi)
+                                   colData = oligo_meta %>%
+                                     mutate(pmi_c = scale(pmi, center = T, scale = F)),
+                                   design = ~ group + sex + pmi_c)
 
 # diff analysis using deseq2
 oligo_dds_diff = DESeq(oligo_dds, 
@@ -770,30 +972,50 @@ oligo_dds_res = results(oligo_dds_diff,
 #                                type = "apeglm")
 
 # make results df
-oligo_dds_res_df <- data.frame(chr = oligo_peak_coords_clean$chr,
-                               start = oligo_peak_coords_clean$start,
-                               end = oligo_peak_coords_clean$end,
-                               baseMean = oligo_dds_res$baseMean,
-                               lfc = oligo_dds_res$log2FoldChange,
-                               lfcSE = oligo_dds_res$lfcSE,
-                               # lfc_shr = oligo_dds_res_shr$log2FoldChange,
-                               stat = oligo_dds_res$stat,
-                               pvalue = oligo_dds_res$pvalue,
-                               padj = oligo_dds_res$padj) 
+oligo_dds_res_df <- data.frame(
+  baseMean = oligo_dds_res$baseMean,
+  lfc = oligo_dds_res$log2FoldChange,
+  lfcSE = oligo_dds_res$lfcSE,
+  # lfc_shr = oligo_dds_res_shr$log2FoldChange,
+  stat = oligo_dds_res$stat,
+  pvalue = oligo_dds_res$pvalue,
+  padj = oligo_dds_res$padj,
+  oligo_peak_coords_clean, 
+  oligo_dds_norm_counts) 
+```
 
+
+Remove age associated regions from oligo pd data
+```{r oligo_rm_age}
+# convert results ot gr object
+oligo_dds_gr <-  makeGRangesFromDataFrame(oligo_dds_res_df %>%
+                                            dplyr::select(-any_of(c("seqnames", "ranges", "strand", "seqlevels", "seqlengths", "isCircular", 
+                                                                    "width", "element"))),
+                                          keep.extra.columns = TRUE,
+                                          seqnames.field = "chr",
+                                          start.field = "start",
+                                          end.field = "end")
+
+# find overlaps with age tt
+oligo_overlaps <- findOverlaps(oligo_dds_gr, 
+                               oligo_age_sig_gr, 
+                               ignore.strand = TRUE) 
+# no overlaps
+```
+
+```{r subset_oligo_hyper_hypo}
 # get only sig hyper acetylated peaks
 oligo_dds_res_df_hyper <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc > 0)
+  subset(padj < 0.05 & lfc > 0) 
 
-dim(oligo_dds_res_df_hyper)
+nrow(oligo_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
 oligo_dds_res_df_hypo <- oligo_dds_res_df %>%
-  subset(padj < 0.05 & lfc < 0)
+  subset(padj < 0.05 & lfc < 0) 
 
 nrow(oligo_dds_res_df_hypo)
 ```
-
 
 ```{r oligo_qqplot}
 qq_p_gg(oligo_dds_res_df$pvalue)
@@ -801,11 +1023,142 @@ lambda_from_p(oligo_dds_res_df$pvalue)
 ```
 
 ```{r oligo_volcano}
-ggplot(oligo_dds_res_df, 
-       aes(x = lfc, 
-           y = -log(pvalue))) +
+oligo_ggplot <- ggplot(oligo_dds_res_df, 
+                       aes(x = lfc, 
+                           y = -log(pvalue),
+                           color = ifelse(padj < 0.05,"FDR<0.05", "FDR≥0.05"))) +
+  geom_point(alpha = 0.8,
+             size = 1) +
+  theme_bw() +
+  scale_color_manual(values = c("#e1235c", "#00326e"),
+                     name = "Significance") +
+  scale_y_continuous(name = "-log(unadjusted p-value)") +
+  scale_x_continuous(name = "log(fold-change)") +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10),
+        legend.title = element_text(size = 9),
+        legend.text = element_text(size = 8), 
+        legend.key.height = unit(0.25, "cm"),
+        legend.key.width = unit(0.25, "cm"),
+        legend.position = "bottom") +
+  ggrepel::geom_text_repel(data = oligo_dds_res_df %>% 
+                             arrange(padj) %>% 
+                             slice_head(n=10),
+                           aes(label = SYMBOL,),
+                           max.overlaps = 100,
+                           box.padding = 0.4, 
+                           min.segment.length = unit(0, 'lines'),
+                           color = "black", 
+                           size = 2.5) 
+
+ggsave(oligo_ggplot, 
+       filename = here("figures",
+                       "20251014_oligo_ggplot_legend.png"),
+       height = 8, width = 8, units = "cm", dpi = 600)
+```
+
+```{r oligo_recap_rat_rotenone}
+# bcl 
+oligo_bcl <- oligo_dds_res_df %>% 
+  subset(SYMBOL == "BCL3") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., oligo_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
   geom_point() +
-  theme_bw() 
+  facet_wrap(~name, scales = "free_y", nrow = 1) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(oligo_bcl, filename = here("figures", "20251014_oligo_bcl3.png"),
+       height = 5, width = 15, units = "cm", dpi = 600)
+
+# mat2b 
+oligo_mat2b <- oligo_dds_res_df %>% 
+  subset(SYMBOL == "MAT2B") %>%
+  subset(grepl("Distal Intergenic", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., oligo_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(oligo_mat2b, filename = here("figures", "20251014_oligo_mat2b.png"),
+       height = 5, width = 5, units = "cm", dpi = 600)
+
+# hif3a 
+oligo_hif3a <- oligo_dds_res_df %>% 
+  subset(SYMBOL == "HIF3A") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., oligo_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(oligo_hif3a, filename = here("figures", "20251014_oligo_hif3a.png"),
+       height = 5, width = 15, units = "cm", dpi = 600)
+
+# olfm4 
+oligo_olfm4 <- oligo_dds_res_df %>% 
+  subset(SYMBOL == "OLFM4") %>%
+  #subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., oligo_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", nrow = 2) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+
+ggsave(oligo_olfm4, filename = here("figures", "20251014_oligo_olfm4.png"),
+       height = 10, width = 25, units = "cm", dpi = 600)
+
 ```
 
 ```{r oligo_go_terms_hyper}
@@ -874,106 +1227,46 @@ oligo_hypo_go <- enrichGO(gene=oligo_hypo_genes,
 dotplot(oligo_hypo_go)
 ```
 
+### Comparison of peaks across cell types
 
-### Differential analysis of neuro
+```{r upset}
+# Make disjoint tiles that partition the union of all ranges
+clusters <- reduce(c(micro_dds_gr, oligo_dds_gr, neuro_dds_gr), ignore.strand = TRUE)
 
-```{r neuro_diff_filter}
-# remove sex chromosomes
-neuro_feat_clean_noxy <- neuro_feat_clean %>%
-  subset(!chr %in% c("X", "Y"))
+# Membership matrix: does a tile overlap each set?
+mats <- list(
+  countOverlaps(clusters, micro_dds_gr, ignore.strand = F) > 0,
+  countOverlaps(clusters, oligo_dds_gr, ignore.strand = F) > 0,
+  countOverlaps(clusters, neuro_dds_gr, ignore.strand = F) > 0
+)
 
-# separate coordinates and counts
-neuro_peak_coords <- neuro_feat_clean[, 1:3]
-neuro_counts <- as.matrix(neuro_feat_clean[, -(1:3)])
+memb <- as.data.frame(setNames(mats, c("microglia", "oligodendrocytes", "neurons")))
 
-# recode group as factor
-# set control as base level
-neuro_meta <- neuro_meta %>%
-  mutate(group = relevel(factor(group), 
-                         ref = "control")) 
 
-# create edgeR dgelist for filtering
-neuro_dgelist <- DGEList(counts = neuro_counts, 
-                         samples = neuro_meta)
+upset <-  upset(
+  memb,
+  intersect = c("microglia", "oligodendrocytes", "neurons"),
+  stripes=upset_stripes(
+    geom=geom_segment(size=7),
+    colors=c("#00326e", "#e1235c", "#63dcff")
+  ),
+  base_annotations = list(
+    "Intersection size" = intersection_size(
+      counts = TRUE,
+      text = list(size = 2),
+      theme = theme(axis.text.y = element_text(size = 7)))),
+  matrix = intersection_matrix(
+    geom = geom_point(size = 2)
+  ),
+  set_sizes=FALSE,
+  height_ratio = 0.30 
+) 
 
-# replicate-aware filtering - min count 5 
-neuro_keep <- filterByExpr(neuro_dgelist, 
-                           group = neuro_dgelist$samples$group, 
-                           min.count = 5,
-                           min.total.count=50) # smallest group (control) has 4 samples
 
-# remove those with <5 from count and peaks
-neuro_peak_coords_clean <- neuro_peak_coords[neuro_keep, ]
-neuro_counts_clean <- neuro_counts[neuro_keep, ]
-
-# recreate neuro dgelist
-neuro_dgelist <- DGEList(counts = neuro_counts_clean, 
-                         genes = neuro_peak_coords_clean,
-                         samples = neuro_meta)
+ggsave(upset, filename = here("figures",
+                              "20251014_celltype_counts_comparison.png"),
+       height = 8, width = 8, units = "cm", dpi = 600)
 ```
-
-
-```{r neuro_diff_deseq2}
-# make deseq2 object
-neuro_dds = DESeqDataSetFromMatrix(countData = neuro_counts_clean,
-                                   colData = neuro_meta,
-                                   design = ~ group + sex + pmi)
-
-# diff analysis using deseq2
-neuro_dds_diff = DESeq(neuro_dds, 
-                       test = "Wald", 
-                       fitType = "local",
-                       # reduced = ~ sv1, # lrt only
-                       sfType = "poscounts")
-
-# get normalized peak counts (uses method from DESeq)
-neuro_dds_norm_counts = counts(neuro_dds_diff, 
-                               normalized = TRUE)  
-
-# create results dataframe
-neuro_dds_res = results(neuro_dds_diff, 
-                        pAdjustMethod = "BH",
-                        independentFiltering = FALSE, 
-                        altHypothesis = "greaterAbs")
-
-# get result names
-# resultsNames(neuro_dds_diff)
-
-# # fold change shrinkage
-# neuro_dds_res_shr <- lfcShrink(neuro_dds_diff, 
-#                                coef = "group_pd_vs_control", 
-#                                type = "apeglm")
-
-# make results df
-neuro_dds_res_df <- data.frame(chr = neuro_peak_coords_clean$chr,
-                               start = neuro_peak_coords_clean$start,
-                               end = neuro_peak_coords_clean$end,
-                               baseMean = neuro_dds_res$baseMean,
-                               lfc = neuro_dds_res$log2FoldChange,
-                               lfcSE = neuro_dds_res$lfcSE,
-                               # lfc_shr = neuro_dds_res_shr$log2FoldChange,
-                               stat = neuro_dds_res$stat,
-                               pvalue = neuro_dds_res$pvalue,
-                               padj = neuro_dds_res$padj) 
-
-```
-
-
-```{r neuro_qqplot}
-qq_p_gg(neuro_dds_res_df$pvalue)
-lambda_from_p(neuro_dds_res_df$pvalue)
-```
-
-```{r neuro_volcano}
-ggplot(neuro_dds_res_df, 
-       aes(x = lfc, 
-           y = -log(pvalue))) +
-  geom_point() +
-  theme_bw() 
-```
-
-
-
 
 
 ### Output size factors
