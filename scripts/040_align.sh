@@ -43,7 +43,7 @@ IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/030_trimm
 OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/040_aligned"
 
 # directory where reference genome (hg19) is
-REF="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.primary_assembly.fa"
+REF="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/ref_genome/Homo_sapiens.GRCh38.dna.chromosomes_only.fa"
 
 # memory samtools to use for sorting 
 SAMTOOLS_SORT_MEM="1G" 
