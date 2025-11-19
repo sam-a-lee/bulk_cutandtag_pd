@@ -164,21 +164,21 @@ Attempt to remove biological and technical variation using surrogate variables (
 Calculate surrogate variables (SVs) for microglia.
 ```{r sva_microglia}
 # create model matrix 
-micro_mod = model.matrix(~as.factor(group) + pmi,
+micro_mod = model.matrix(~as.factor(group) + pmi + sex,
                          data = micro_meta)
 # create null matrix
 micro_mod0 = model.matrix(~1,
                           data=micro_meta)
 
 # estimate num svs req
-#micro_nsv = num.sv(micro_feat_clean[,-c(1:3)],
-#                   micro_mod)
+micro_nsv = num.sv(micro_feat_clean[,-c(1:3)],
+                  micro_mod)
 
 # 1 sv per above but calculate five to see correlations
 micro_svobj = sva(as.matrix(micro_feat_clean[,-c(1:3)]),
                   micro_mod,
                   micro_mod0,
-                  n.sv=5)
+                  n.sv=micro_nsv)
 ```
 
 Examine correlation between microglia SVs and metadata
@@ -186,7 +186,7 @@ Examine correlation between microglia SVs and metadata
 # bind meta + svs
 micro_meta_svs <- cbind(micro_meta, micro_svobj$sv)
 # rename sv cols
-colnames(micro_meta_svs)[9:13] <- c("sv1", "sv2", "sv3", "sv4", "sv5")
+colnames(micro_meta_svs)[10] <- c("sv") #"sv2", "sv3", "sv4", "sv5")
 
 # convert all var to num for corr
 micro_meta_corr <- micro_meta_svs %>%
@@ -217,6 +217,14 @@ ggplot(data = micro_corr_long,
             size = 4) 
 ```
 
+```{r frip_depth_corr}
+micro_meta$lib_size <- colSums(micro_feat_clean[,-c(1:3)])
+
+
+# 4. Examine correlation
+cor_test <- cor.test(micro_meta$frip, micro_meta$lib_size, method = "spearman")
+
+```
 
 ### SVA oligodendrocytes 
 

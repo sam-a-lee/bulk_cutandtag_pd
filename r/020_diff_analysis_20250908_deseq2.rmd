@@ -27,9 +27,11 @@ library(clusterProfiler) # go analysis
 library(TxDb.Hsapiens.UCSC.hg38.knownGene) # anno library
 library(org.Hs.eg.db) # human annotation
 library(Gviz) # ucsc track vis
-library(GenomicRanges)
-library(rtracklayer)
-library(biomaRt)
+library(GenomicRanges) # gr objects
+library(rtracklayer) # import data
+library(biomaRt) # get annotations
+library(car) # vif
+library(bacon) # bayesian adjustment for genomic inflation 
 ```
 
 Source required custom function
@@ -419,9 +421,7 @@ sum(micro_keep) # 90486
 # remove those with <5 from count and peaks
 micro_peak_coords_clean <- micro_peak_coords[micro_keep, ]
 micro_counts_clean <- micro_counts[micro_keep, ]
-```
 
-```{r micro_diff_deseq2}
 # make deseq2 object
 # levels of h3k27ac decrease as soon as 24 PMI (https://pmc.ncbi.nlm.nih.gov/articles/PMC6330433/)
 micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
@@ -429,12 +429,57 @@ micro_dds = DESeqDataSetFromMatrix(countData = micro_counts_clean,
                                      mutate(pmi_c = scale(pmi, 
                                                           scale = F, 
                                                           center = T)),
-                                   design = ~ group + sex + pmi_c)
+                                   design = ~ group + pmi_c + sex)
+```
 
+Examine sample clustering
+```{r micro_dds_sample_clustering}
+colData(micro_dds)$condition <- colData(micro_dds)$group  # or whatever column
+vsd <- vst(micro_dds)
+
+plotPCA(vsd) # top 500  
+plotPCA(vsd, n=90618)  # all (equivalent to below) 
+
+mat <- assay(vsd)
+pca <- prcomp(t(mat), scale. = FALSE)
+pc <- as.data.frame(pca$x)
+pc$sample <- rownames(pc)
+
+# Euclidean distance from the multivariate center
+center <- colMeans(pc[,1:5])   # using first 5 PCs is common
+d <- sqrt(rowSums((pc[,1:5] - center)^2))
+
+# Convert distances to Z-scores
+z <- scale(d)
+
+# Mark outliers (|Z| > 3)
+pc$outlier <- abs(z) > 3
+```
+
+```{r micro_check_vif}
+md <- as.data.frame(colData(micro_dds))
+
+# Ensure factors are coded as factors; pmi numeric
+md$pd  <- as.factor(md$group)
+md$sex <- as.factor(md$sex)
+md$pmi <- as.numeric(md$pmi)
+
+# Fit a dummy linear model (response is random noise)
+set.seed(1)
+fit <- lm(rnorm(nrow(md)) ~ group + pmi_c + sex, data = md)
+
+# VIFs (GVIF for multi-df factors)
+vif(fit)
+# group      pmi_      sex 
+# 1.036150 1.607185 1.597796 
+```
+
+```{r micro_diff_deseq2}
 # diff analysis using deseq2
 micro_dds_diff = DESeq(micro_dds, 
                        test = "Wald", 
                        fitType = "local",
+                       minReplicatesForReplace = 5,
                        # reduced = ~ sv1, # lrt only
                        sfType = "poscounts")
 
@@ -466,10 +511,37 @@ micro_dds_res_df <- data.frame(baseMean = micro_dds_res$baseMean,
                                padj = micro_dds_res$padj,
                                micro_peak_coords_clean, 
                                micro_dds_norm_counts) 
+
+bc <- bacon(micro_dds_res_df$stat)
+micro_dds_res_df$padj_bacon <- pval(bc) %>% p.adjust(method = "BH")
+micro_dds_res_df$pvalue_bacon <- pval(bc)
+
+# get normalized counts after accounting for covariates
+vsd <- vst(micro_dds)
+
+# Adjust for covariates batch + sex
+assay_adj <- limma::removeBatchEffect(
+   # assay(vsd),
+  micro_dds_norm_counts,
+    covariates = model.matrix(~ sex + pmi_c, data = colData(vsd))[ , -1]
+)
+
+assay_adj <- cbind(assay_adj, 
+                   micro_peak_coords_clean,
+                   baseMean = micro_dds_res$baseMean,
+                               lfc = micro_dds_res$log2FoldChange,
+                               lfcSE = micro_dds_res$lfcSE,
+                               #lfc_shr = micro_dds_res_shr$log2FoldChange,
+                               stat = micro_dds_res$stat,
+                               pvalue = micro_dds_res$pvalue,
+                               padj = micro_dds_res$padj,
+                   padj_bacon = micro_dds_res_df$padj_bacon)
 ```
 
 Remove age associated regions from micro pd data
 ```{r micro_rm_age}
+library(GenomeInfoDb)
+
 # convert results ot gr object
 micro_dds_gr <-  makeGRangesFromDataFrame(micro_dds_res_df %>%
                                             dplyr::select(-any_of(c("seqnames", "ranges", "strand", "seqlevels", "seqlengths", "isCircular", 
@@ -479,36 +551,61 @@ micro_dds_gr <-  makeGRangesFromDataFrame(micro_dds_res_df %>%
                                           start.field = "start",
                                           end.field = "end")
 
+# put both in same style
+seqlevelsStyle(micro_dds_gr) <- "UCSC"
+seqlevelsStyle(micro_age_sig_gr) <- "UCSC"
+
 # find overlaps with age tt
 micro_overlaps <- findOverlaps(micro_dds_gr, 
                                micro_age_sig_gr, 
                                ignore.strand = TRUE) 
-# no overlaps
+
+
+# remove overlaps
+micro_dds_res_df_noage <- micro_dds_res_df[!rownames(micro_dds_res_df) %in% (micro_overlaps@from), ]
+
+write.csv(micro_dds_res_df_noage,
+          file = here("data_out",
+                      "080_diff_analysis",
+                      "20251112_micro_deseq2_res.csv"))
 ```
+
 ```{r subset_micro_hyper_hypo}
 # get only sig hyper acetylated peaks
-micro_dds_res_df_hyper <- micro_dds_res_df %>%
+micro_dds_res_df_hyper <- micro_dds_res_df_noage %>%
   subset(padj < 0.05 & lfc > 0) 
 
 nrow(micro_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
-micro_dds_res_df_hypo <- micro_dds_res_df %>%
+micro_dds_res_df_hypo <- micro_dds_res_df_noage %>%
   subset(padj < 0.05 & lfc < 0) 
 
 nrow(micro_dds_res_df_hypo)
 ```
 
 ```{r micro_qqplot}
-qq_p_gg(micro_dds_res_df$pvalue)
-lambda_from_p(micro_dds_res_df$pvalue)
+micro_qqplot <- qq_p_gg(micro_dds_res_df$pvalue_bacon) +
+  # ggtitle("Microglia") +
+  annotate("text", 
+           label = paste0("λ=", round(lambda_from_p(micro_dds_res_df$pvalue_bacon),2)),
+           x = 1, 
+           y = 10,
+           size = 3)  +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10)) 
+
+ggsave(micro_qqplot, 
+       filename = here("figures",
+                       "20251112_micro_qqplot.png"),
+       height = 6.5, width = 8, units = "cm", dpi = 600)
 ```
 
 ```{r micro_volcano}
-micro_ggplot <- ggplot(micro_dds_res_df, 
-                       aes(x = lfc, 
-                           y = -log(pvalue),
-                           color = ifelse(padj < 0.05,"FDR<0.05", "FDR≥0.05"))) +
+micro_volcano <- ggplot(micro_dds_res_df_noage, 
+                        aes(x = lfc, 
+                            y = -log(pvalue_bacon),
+                            color = ifelse(padj_bacon < 0.05,"FDR<0.05", "FDR≥0.05"))) +
   geom_point(alpha = 0.8,
              size = 1) +
   theme_bw() +
@@ -522,9 +619,9 @@ micro_ggplot <- ggplot(micro_dds_res_df,
         legend.text = element_text(size = 6), 
         legend.key.height = unit(0.25, "cm"),
         legend.key.width = unit(0.25, "cm"),
-        legend.position = "none") +
-  ggrepel::geom_text_repel(data = micro_dds_res_df %>% 
-                             arrange(padj) %>% 
+        legend.position = "bottom") +
+  ggrepel::geom_text_repel(data = micro_dds_res_df_noage %>% 
+                             arrange(padj_bacon) %>% 
                              slice_head(n=10),
                            aes(label = SYMBOL,),
                            max.overlaps = 100,
@@ -533,32 +630,49 @@ micro_ggplot <- ggplot(micro_dds_res_df,
                            color = "black", 
                            size = 2.5) 
 
-ggsave(micro_ggplot, 
+ggsave(micro_volcano, 
        filename = here("figures",
-                       "20251014_micro_ggplot.png"),
-       height = 8, width = 8, units = "cm", dpi = 600)
+                       "20251112_micro_volcano_legend.png"),
+       height = 7, width = 8, units = "cm", dpi = 600)
 ```
 
-```{r vis_top_peak_hyper}
+```{r micro_big_wigs}
+# import microglia control and pd bigwigs
+micro_pd_gr <- rtracklayer::import(here("data_out",
+                                        "070_peaks", 
+                                        "079_bigwigs_groups",
+                                        "microglia",
+                                        "microglia_disease_merged_cpm.bw"), 
+                                   format = "bigWig")
+
+micro_ctl_gr <- rtracklayer::import(here("data_out",
+                                         "070_peaks", 
+                                         "079_bigwigs_groups",
+                                         "microglia",
+                                         "microglia_control_merged_cpm.bw"), 
+                                    format = "bigWig")
+```
+
+```{r micro_vis_KMT2B_track}
 # region (use NCBI-style chr names for hg38)
 gen   <- "hg38"
-chrom <- 11
-start <- 31792734
-end   <- 31819119
+chrom <- 19
+start <- 35717103
+end   <- 35739640
+
 
 ax <- GenomeAxisTrack()
 
 mart <- useEnsembl(biomart = "genes", 
                    dataset = "hsapiens_gene_ensembl")
 
-grt <- BiomartGeneRegionTrack(
-  chromosome= chrom,
-  start = start,
-  end = end,
-  genome = gen,
-  name        = "Ensembl (HGNC symbols)",
-  biomart     = mart
-)
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
 
 rg <- ranges(grt)
 sym <- mcols(rg)$symbol
@@ -567,7 +681,7 @@ sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
 mcols(rg)$symbol <- sym
 grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
 
-
+# set gene track
 displayPars(grt) <- list(
   transcriptAnnotation = "symbol",  # show HGNC symbols
   geneSymbol = TRUE,
@@ -575,33 +689,32 @@ displayPars(grt) <- list(
   fontsize = 10
 )
 
-# ---- signal tracks (BigWig) ----
-# Tip: You can also use type="h" (horizon), "histogram", or "p" (points). Histogram is nice for CPM.
+
+# get control signal track
 control_tr <- DataTrack(
-  range       = ctl_bw,
+  range       = micro_ctl_gr,
   genome      = gen,
   chromosome  = chrom,
   type        = "histogram",
-  col.histogram="darkblue",
-  fill.histogram="darkblue",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
   name        = "Control (CPM)",
 )
 
+# get pd signal track
 pd_tr <- DataTrack(
-  range       = dis_bw,
+  range       = micro_pd_gr,
   genome      = gen,
   chromosome  = chrom,
   type        = "histogram",
-  col.histogram="darkred", 
-  fill.histogram="darkred",
-  name        = "Disease (CPM)"
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
 )
 
-
-# --- define the differential peak span ---
-peak_start <- 31802734
-peak_end   <- 31809119
-
+# create track to indicate where peak
+peak_start <- 35727103
+peak_end   <- 35729640
 
 # Build a clean GRanges with an 'id' column (character, length == n features)
 diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
@@ -610,7 +723,6 @@ mcols(diff_peak)$id <- NA  # label to display
 # Sanity check: id length matches feature count
 stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
 
-# Make the boxed AnnotationTrack
 diff_tr <- AnnotationTrack(
   range      = diff_peak,
   genome     = gen,
@@ -621,6 +733,148 @@ diff_tr <- AnnotationTrack(
   stacking   = "dense"
 )
 
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "micro_kmt2b_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8,
+            sizes = c(0.25, 1, 1, 2, 2, 0.25))    # if you use main = "...")
+
+dev.off()
+```
+
+```{r micro_vis_KMT2B_boxlot}
+micro_kmt2b_boxplot <- micro_dds_res_df_noage %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=1) %>%
+  dplyr::select("IGF136820":"IGF136844") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        micro_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+
+ggsave(plot = micro_kmt2b_boxplot, device = "png",
+       filename = here("figures", "20251112_micro_kmt2b_boxplot.png"),
+       height = 8, width = 8, units = "cm", dpi = 600)
+
+```
+
+
+```{r micro_vis_adarb2_1_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 10
+start <- 1647589
+end   <- 1669739
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = micro_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = micro_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 1657589
+peak_end   <- 1659739
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
 
 displayPars(diff_tr) <- c(
   displayPars(diff_tr),
@@ -631,15 +885,202 @@ displayPars(diff_tr) <- c(
   )
 )
 
-# 4) Plot (put genes between axis and signal if you like)
-plotTracks(list(ax, grt, pd_tr, control_tr, diff_tr),
-           chromosome = chrom, from = start, to = end,
-           background.title = "white", col.title = "black")
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "micro_kmt2b_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8)    # if you use main = "...")
+
+dev.off()
+```
+
+```{r micro_vis_adarb2_1_boxlot}
+micro_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=2) %>%
+   slice_tail(n=1) %>%
+  dplyr::select("IGF136820":"IGF136844") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        micro_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+
+```
+
+
+```{r micro_vis_adarb2_2_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 10
+start <- 1640589
+end   <- 1662567
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = micro_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = micro_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 1650589
+peak_end   <- 1652567
+
+	
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "micro_kmt2b_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8)    # if you use main = "...")
+
+dev.off()
+```
+
+```{r micro_vis_adarb2_2_boxlot}
+micro_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=3) %>%
+   slice_tail(n=1) %>%
+  dplyr::select("IGF136820":"IGF136844") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        micro_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+
 ```
 
 ```{r micro_recap_rat_rotenone}
 # bcl 
-micro_bcl <- micro_dds_res_df %>% 
+micro_bcl <- micro_dds_res_df_noage %>% 
   subset(SYMBOL == "BCL3") %>%
   subset(grepl("Promoter", annotation)) %>%
   dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
@@ -660,11 +1101,11 @@ micro_bcl <- micro_dds_res_df %>%
   scale_y_continuous(name = "Counts") + 
   scale_x_discrete(labels = c("Control", "PD"))
 
-ggsave(micro_bcl, filename = here("figures", "20251014_micro_bcl3.png"),
+ggsave(micro_bcl, filename = here("figures", "20251112_micro_bcl3.png"),
        height = 5, width = 20, units = "cm", dpi = 600)
 
 # mat2b 
-micro_mat2b <- micro_dds_res_df %>% 
+micro_mat2b <- micro_dds_res_df_noage %>% 
   subset(SYMBOL == "MAT2B") %>%
   subset(grepl("Distal Intergenic", annotation)) %>%
   dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
@@ -685,11 +1126,11 @@ micro_mat2b <- micro_dds_res_df %>%
   scale_y_continuous(name = "Counts") + 
   scale_x_discrete(labels = c("Control", "PD"))
 
-ggsave(micro_mat2b, filename = here("figures", "20251014_micro_mat2b.png"),
+ggsave(micro_mat2b, filename = here("figures", "20251112_micro_mat2b.png"),
        height = 5, width = 5, units = "cm", dpi = 600)
 
 # hif3a 
-micro_hif3a <- micro_dds_res_df %>% 
+micro_hif3a <- micro_dds_res_df_noage %>% 
   subset(SYMBOL == "HIF3A") %>%
   subset(grepl("Promoter", annotation)) %>%
   dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
@@ -710,11 +1151,11 @@ micro_hif3a <- micro_dds_res_df %>%
   scale_y_continuous(name = "Counts") + 
   scale_x_discrete(labels = c("Control", "PD"))
 
-ggsave(micro_hif3a, filename = here("figures", "20251014_micro_hif3a.png"),
+ggsave(micro_hif3a, filename = here("figures", "20251112_micro_hif3a.png"),
        height = 5, width = 12, units = "cm", dpi = 600)
 
 # olfm4 
-micro_olfm4 <- micro_dds_res_df %>% 
+micro_olfm4 <- micro_dds_res_df_noage %>% 
   subset(SYMBOL == "OLFM4") %>%
   #subset(grepl("Promoter", annotation)) %>%
   dplyr::select(c(chr, start, end, IGF136820:IGF136844)) %>%
@@ -735,9 +1176,8 @@ micro_olfm4 <- micro_dds_res_df %>%
   scale_y_continuous(name = "Counts") + 
   scale_x_discrete(labels = c("Control", "PD"))
 
-ggsave(micro_olfm4, filename = here("figures", "20251014_micro_olfm4.png"),
+ggsave(micro_olfm4, filename = here("figures", "20251112_micro_olfm4.png"),
        height = 5, width = 25, units = "cm", dpi = 600)
-
 ```
 
 ```{r vis_top_peak_hypo}
@@ -932,20 +1372,39 @@ oligo_keep <- filterByExpr(oligo_dgelist,
                            min.count = 5, 
                            min.total.count=50) # smallest group (control) has 4 samples
 
-sum(oligo_keep) # 76711
+sum(oligo_keep) #
 
 # remove those with <5 from count and peaks
 oligo_peak_coords_clean <- oligo_peak_coords[oligo_keep, ]
 oligo_counts_clean <- oligo_counts[oligo_keep, ]
-```
 
-```{r oligo_diff_deseq2}
 # make deseq2 object
 oligo_dds = DESeqDataSetFromMatrix(countData = oligo_counts_clean,
                                    colData = oligo_meta %>%
                                      mutate(pmi_c = scale(pmi, center = T, scale = F)),
-                                   design = ~ group + sex + pmi_c)
+                                   design = ~ group + pmi + sex)
+```
 
+```{r oligo_check_vif}
+md <- as.data.frame(colData(oligo_dds))
+
+# Ensure factors are coded as factors; pmi numeric
+md$pd  <- as.factor(md$group)
+md$sex <- as.factor(md$sex)
+md$pmi <- as.numeric(md$pmi)
+
+# Fit a dummy linear model (response is random noise)
+set.seed(1)
+fit <- lm(rnorm(nrow(md)) ~ group + pmi + sex, data = md)
+
+# VIFs (GVIF for multi-df factors)
+vif(fit)
+#  group      pmi      sex 
+# 1.036150 1.607185 1.597796 
+
+```
+
+```{r oligo_diff_deseq2}
 # diff analysis using deseq2
 oligo_dds_diff = DESeq(oligo_dds, 
                        test = "Wald", 
@@ -982,8 +1441,11 @@ oligo_dds_res_df <- data.frame(
   padj = oligo_dds_res$padj,
   oligo_peak_coords_clean, 
   oligo_dds_norm_counts) 
-```
 
+bc <- bacon(oligo_dds_res_df$stat)
+oligo_dds_res_df$padj_bacon <- pval(bc) %>% p.adjust(method = "BH")
+oligo_dds_res_df$pvalue_bacon <- pval(bc)
+```
 
 Remove age associated regions from oligo pd data
 ```{r oligo_rm_age}
@@ -996,37 +1458,61 @@ oligo_dds_gr <-  makeGRangesFromDataFrame(oligo_dds_res_df %>%
                                           start.field = "start",
                                           end.field = "end")
 
+# put both in same style
+seqlevelsStyle(oligo_dds_gr) <- "UCSC"
+seqlevelsStyle(oligo_age_sig_gr) <- "UCSC"
+
 # find overlaps with age tt
 oligo_overlaps <- findOverlaps(oligo_dds_gr, 
                                oligo_age_sig_gr, 
                                ignore.strand = TRUE) 
-# no overlaps
+
+
+# remove overlaps
+oligo_dds_res_df_noage <- oligo_dds_res_df[!rownames(oligo_dds_res_df) %in% (oligo_overlaps@from), ]
+
+write.csv(oligo_dds_res_df_noage,
+          file = here("data_out",
+                      "080_diff_analysis",
+                      "20251112_oligo_deseq2_res.csv"))
 ```
 
 ```{r subset_oligo_hyper_hypo}
 # get only sig hyper acetylated peaks
-oligo_dds_res_df_hyper <- oligo_dds_res_df %>%
+oligo_dds_res_df_hyper <- oligo_dds_res_df_noage %>%
   subset(padj < 0.05 & lfc > 0) 
 
 nrow(oligo_dds_res_df_hyper)
 
 # get only sig hypoacetylated peaks
-oligo_dds_res_df_hypo <- oligo_dds_res_df %>%
+oligo_dds_res_df_hypo <- oligo_dds_res_df_noage %>%
   subset(padj < 0.05 & lfc < 0) 
 
 nrow(oligo_dds_res_df_hypo)
 ```
 
 ```{r oligo_qqplot}
-qq_p_gg(oligo_dds_res_df$pvalue)
-lambda_from_p(oligo_dds_res_df$pvalue)
+oligo_qqplot <- qq_p_gg(oligo_dds_res_df$pvalue_bacon) +
+  # ggtitle("oligoglia") +
+  annotate("text", 
+           label = paste0("λ=", round(lambda_from_p(oligo_dds_res_df$pvalue_bacon),2)),
+           x = 4, 
+           y = 2,
+           size = 3)  +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10)) 
+
+ggsave(oligo_qqplot, 
+       filename = here("figures",
+                       "20251112_oligo_qqplot.png"),
+       height = 6.5, width = 8, units = "cm", dpi = 600)
 ```
 
 ```{r oligo_volcano}
-oligo_ggplot <- ggplot(oligo_dds_res_df, 
-                       aes(x = lfc, 
-                           y = -log(pvalue),
-                           color = ifelse(padj < 0.05,"FDR<0.05", "FDR≥0.05"))) +
+oligo_volcano <- ggplot(oligo_dds_res_df, 
+                        aes(x = lfc, 
+                            y = -log(pvalue_bacon),
+                            color = ifelse(padj_bacon < 0.05,"FDR<0.05", "FDR≥0.05"))) +
   geom_point(alpha = 0.8,
              size = 1) +
   theme_bw() +
@@ -1042,20 +1528,457 @@ oligo_ggplot <- ggplot(oligo_dds_res_df,
         legend.key.width = unit(0.25, "cm"),
         legend.position = "bottom") +
   ggrepel::geom_text_repel(data = oligo_dds_res_df %>% 
-                             arrange(padj) %>% 
+                             arrange(padj_bacon) %>% 
                              slice_head(n=10),
-                           aes(label = SYMBOL,),
+                           aes(label = SYMBOL),
                            max.overlaps = 100,
                            box.padding = 0.4, 
                            min.segment.length = unit(0, 'lines'),
                            color = "black", 
                            size = 2.5) 
 
-ggsave(oligo_ggplot, 
+ggsave(oligo_volcano, 
        filename = here("figures",
-                       "20251014_oligo_ggplot_legend.png"),
-       height = 8, width = 8, units = "cm", dpi = 600)
+                       "20251112_oligo_volcano_legend.png"),
+       height = 7, width = 8, units = "cm", dpi = 600)
 ```
+
+```{r oligo_big_wigs}
+# import oligoglia control and pd bigwigs
+oligo_pd_gr <- rtracklayer::import(here("data_out",
+                                        "070_peaks", 
+                                        "079_bigwigs_groups",
+                                        "oligodendrocyte",
+                                        "oligodendrocyte_disease_merged_cpm.bw"), 
+                                   format = "bigWig")
+
+oligo_ctl_gr <- rtracklayer::import(here("data_out",
+                                         "070_peaks", 
+                                         "079_bigwigs_groups",
+                                         "oligodendrocyte",
+                                         "oligodendrocyte_control_merged_cpm.bw"), 
+                                    format = "bigWig")
+```
+
+```{r oligo_vis_KMT2B_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 19
+start <- 35717008
+end   <- 35740790
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = oligo_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = oligo_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 35727008
+peak_end   <- 35730790
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "oligo_kmt2b_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8,
+            sizes = c(0.25, 1, 1, 2, 2, 0.25))    # if you use main = "...")
+
+dev.off()
+```
+
+```{r oligo_vis_KMT2B_boxlot}
+oligo_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=1) %>%
+  dplyr::select("IGF136819":"IGF138590") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        oligo_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+```
+
+
+
+```{r oligo_vis_MIR1257_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 20
+start <- 61863651
+end   <- 61886844
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = oligo_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = oligo_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 61873651
+peak_end   <- 61876844
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "oligo_mir1257_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8,
+            sizes = c(0.25, 1, 1, 2, 2, 0.25))    # if you use main = "...")
+
+dev.off()
+```
+
+```{r oligo_vis_MIR1257_boxlot}
+oligo_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=2) %>%
+  slice_tail(n=1) %>%
+  dplyr::select("IGF136819":"IGF138590") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        oligo_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+```
+
+```{r oligo_vis_ADARB2_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 10
+start <- 1640536
+end   <- 1665314
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = oligo_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = oligo_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 1650536
+peak_end   <- 1655314
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "oligo_adarb2_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8,
+            sizes = c(0.25, 1, 1, 2, 2, 0.25))    # if you use main = "...")
+
+dev.off()
+```
+
+```{r oligo_vis_ADARB2_boxlot}
+oligo_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=3) %>%
+  slice_tail(n=1) %>%
+  dplyr::select("IGF136819":"IGF138590") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        oligo_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+```
+
+
 
 ```{r oligo_recap_rat_rotenone}
 # bcl 
@@ -1226,6 +2149,542 @@ oligo_hypo_go <- enrichGO(gene=oligo_hypo_genes,
                           qvalueCutoff=0.05)
 dotplot(oligo_hypo_go)
 ```
+
+
+### Differential analysis of neurons
+
+```{r neuro_diff_filter}
+# remove sex chromosomes
+neuro_feat_clean_noxy <- neuro_feat_clean_anno %>%
+  subset(!chr %in% c("X", "Y"))
+
+# separate coordinates and counts 
+neuro_peak_coords <- neuro_feat_clean_noxy[, c(1:3, 13:27)]
+neuro_counts <- as.matrix(neuro_feat_clean_noxy[, -c(1:3, 13:27)])
+
+# recode group as factor
+# set control as base level
+neuro_meta <- neuro_meta %>%
+  mutate(group = relevel(factor(group), 
+                         ref = "control")) 
+
+# create edgeR dgelist for filtering
+neuro_dgelist <- DGEList(counts = neuro_counts, 
+                         samples = neuro_meta)
+
+# replicate-aware filtering - min count 5 
+neuro_keep <- filterByExpr(neuro_dgelist, 
+                           group = neuro_dgelist$samples$group, 
+                           min.count = 5, 
+                           min.total.count=50) # smallest group (control) has 4 samples
+
+sum(neuro_keep) # 92886
+
+# remove those with <5 from count and peaks
+neuro_peak_coords_clean <- neuro_peak_coords[neuro_keep, ]
+neuro_counts_clean <- neuro_counts[neuro_keep, ]
+
+# make deseq2 object
+neuro_dds = DESeqDataSetFromMatrix(countData = neuro_counts_clean,
+                                   colData = neuro_meta %>%
+                                     mutate(pmi_c = scale(pmi, center = T, scale = F)),
+                                   design = ~ group + pmi + sex)
+```
+
+```{r neuro_check_vif}
+md <- as.data.frame(colData(neuro_dds))
+
+# Ensure factors are coded as factors; pmi numeric
+md$pd  <- as.factor(md$group)
+md$sex <- as.factor(md$sex)
+md$pmi <- as.numeric(md$pmi)
+
+# Fit a dummy linear model (response is random noise)
+set.seed(1)
+fit <- lm(rnorm(nrow(md)) ~ group + pmi + sex, data = md)
+
+# VIFs (GVIF for multi-df factors)
+vif(fit)
+#  group      pmi      sex 
+# 1.036150 1.607185 1.597796 
+
+```
+
+```{r neuro_diff_deseq2}
+# diff analysis using deseq2
+neuro_dds_diff = DESeq(neuro_dds, 
+                       test = "Wald", 
+                       fitType = "local",
+                       # reduced = ~ sv1, # lrt only
+                       sfType = "poscounts")
+
+# get normalized peak counts (uses method from DESeq)
+neuro_dds_norm_counts = counts(neuro_dds_diff, 
+                               normalized = TRUE)  
+
+# create results dataframe
+neuro_dds_res = results(neuro_dds_diff, 
+                        pAdjustMethod = "BH",
+                        independentFiltering = FALSE, 
+                        altHypothesis = "greaterAbs")
+
+# get result names
+# resultsNames(neuro_dds_diff)
+
+# # fold change shrinkage
+# neuro_dds_res_shr <- lfcShrink(neuro_dds_diff, 
+#                                coef = "group_pd_vs_control", 
+#                                type = "apeglm")
+
+# make results df
+neuro_dds_res_df <- data.frame(
+  baseMean = neuro_dds_res$baseMean,
+  lfc = neuro_dds_res$log2FoldChange,
+  lfcSE = neuro_dds_res$lfcSE,
+  # lfc_shr = neuro_dds_res_shr$log2FoldChange,
+  stat = neuro_dds_res$stat,
+  pvalue = neuro_dds_res$pvalue,
+  padj = neuro_dds_res$padj,
+  neuro_peak_coords_clean, 
+  neuro_dds_norm_counts) 
+
+bc <- bacon(neuro_dds_res_df$stat)
+neuro_dds_res_df$padj_bacon <- pval(bc) %>% p.adjust(method = "BH")
+neuro_dds_res_df$pvalue_bacon <- pval(bc)
+```
+
+
+Remove age associated regions from oligo pd data
+```{r neuro_rm_age}
+# convert results ot gr object
+neuro_dds_gr <-  makeGRangesFromDataFrame(neuro_dds_res_df %>%
+                                            dplyr::select(-any_of(c("seqnames", 
+                                                                    "ranges",
+                                                                    "strand", 
+                                                                    "seqlevels", 
+                                                                    "seqlengths", 
+                                                                    "isCircular", 
+                                                                    "width", 
+                                                                    "element"))),
+                                          keep.extra.columns = TRUE,
+                                          seqnames.field = "chr",
+                                          start.field = "start",
+                                          end.field = "end")
+
+# put both in same style
+seqlevelsStyle(neuro_dds_gr) <- "UCSC"
+seqlevelsStyle(neuro_age_sig_gr) <- "UCSC"
+
+# find overlaps with age tt
+neuro_overlaps <- findOverlaps(neuro_dds_gr, 
+                               neuro_age_sig_gr, 
+                               ignore.strand = TRUE) 
+
+
+# remove overlaps
+neuro_dds_res_df_noage <- neuro_dds_res_df[!rownames(neuro_dds_res_df) %in% (neuro_overlaps@from), ]
+
+write.csv(neuro_dds_res_df_noage,
+          file = here("data_out",
+                      "080_diff_analysis",
+                      "20251112_neuro_deseq2_res.csv"))
+```
+
+```{r subset_neuro_hyper_hypo}
+# get only sig hyper acetylated peaks
+neuro_dds_res_df_hyper <- neuro_dds_res_df_noage %>%
+  subset(padj < 0.05 & lfc > 0) 
+
+nrow(neuro_dds_res_df_hyper)
+
+# get only sig hypoacetylated peaks
+neuro_dds_res_df_hypo <- neuro_dds_res_df_noage %>%
+  subset(padj < 0.05 & lfc < 0) 
+
+nrow(neuro_dds_res_df_hypo)
+```
+
+
+```{r neuro_qqplot}
+neuro_qqplot <- qq_p_gg(neuro_dds_res_df$pvalue_bacon) +
+  # ggtitle("neuroglia") +
+  annotate("text", 
+           label = paste0("λ=", 
+                          round(lambda_from_p(neuro_dds_res_df$pvalue_bacon),2)),
+           x = 4, 
+           y = 1,
+           size = 3)  +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10)) 
+
+ggsave(neuro_qqplot, 
+       filename = here("figures",
+                       "20251112_neuro_qqplot.png"),
+       height = 6.5, width = 8, units = "cm", dpi = 600)
+```
+
+
+```{r neuro_big_wigs}
+# import oligoglia control and pd bigwigs
+neuro_pd_gr <- rtracklayer::import(here("data_out",
+                                        "070_peaks", 
+                                        "079_bigwigs_groups",
+                                        "neuron",
+                                        "neuron_disease_merged_cpm.bw"), 
+                                   format = "bigWig")
+
+neuro_ctl_gr <- rtracklayer::import(here("data_out",
+                                         "070_peaks", 
+                                         "079_bigwigs_groups",
+                                         "neuron",
+                                         "neuron_control_merged_cpm.bw"), 
+                                    format = "bigWig")
+```
+
+```{r neuro_vis_TSHR_track}
+# region (use NCBI-style chr names for hg38)
+gen   <- "hg38"
+chrom <- 14
+start <- 80944815
+end   <- 80966364
+
+ax <- GenomeAxisTrack()
+
+mart <- useEnsembl(biomart = "genes", 
+                   dataset = "hsapiens_gene_ensembl")
+
+# get gene information for this region
+grt <- BiomartGeneRegionTrack(chromosome= chrom,
+                              start = start,
+                              end = end,
+                              genome = gen,
+                              name = "Ensembl (HGNC symbols)",
+                              biomart = mart)
+
+rg <- ranges(grt)
+sym <- mcols(rg)$symbol
+gid <- mcols(rg)$gene
+sym[is.na(sym) | sym == ""] <- gid[is.na(sym) | sym == ""]
+mcols(rg)$symbol <- sym
+grt <- GeneRegionTrack(rg, genome = gen, chromosome = chrom, name = "Genes")
+
+# set gene track
+displayPars(grt) <- list(
+  transcriptAnnotation = "symbol",  # show HGNC symbols
+  geneSymbol = TRUE,
+  collapseTranscripts = "meta",     # "meta" | "longest" | "gene" | FALSE
+  fontsize = 10
+)
+
+
+# get control signal track
+control_tr <- DataTrack(
+  range       = neuro_ctl_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#00326e",
+  fill.histogram="#00326e",
+  name        = "Control (CPM)",
+)
+
+# get pd signal track
+pd_tr <- DataTrack(
+  range       = neuro_pd_gr,
+  genome      = gen,
+  chromosome  = chrom,
+  type        = "histogram",
+  col.histogram="#e1235c", 
+  fill.histogram="#e1235c",
+  name        = "PD (CPM)"
+)
+
+# create track to indicate where peak
+peak_start <- 80954815
+peak_end   <- 80956364
+
+# Build a clean GRanges with an 'id' column (character, length == n features)
+diff_peak <- GRanges(seqnames = chrom, ranges = IRanges(peak_start, peak_end))
+mcols(diff_peak)$id <- NA  # label to display
+
+# Sanity check: id length matches feature count
+stopifnot(length(mcols(diff_peak)$id) == length(diff_peak))
+
+diff_tr <- AnnotationTrack(
+  range      = diff_peak,
+  genome     = gen,
+  chromosome = chrom,
+  col        = "black",
+  fill = "black",
+  lwd        = 2,
+  stacking   = "dense"
+)
+
+displayPars(diff_tr) <- c(
+  displayPars(diff_tr),
+  list(
+    featureAnnotation = NULL,  # draw text from mcols(...)$id
+    fontsize          = 9,
+    just              = "above"  # place label above feature
+  )
+)
+
+# get chromosome track
+ideo_tr <- IdeogramTrack(genome = gen, chromosome = chrom)
+
+# plot tracks together 
+png(here("figures", "neuro_tshr_track.png"), width = 3600, height = 3600, res = 600)
+
+plotTracks(list(ideo_tr, 
+                ax, 
+                grt, 
+                pd_tr, 
+                control_tr, 
+                diff_tr),
+           chromosome = chrom, 
+           from = start,
+           to = end,
+           background.title = "white",
+           col.title = "black",
+           cex.axis = 0.6,   # bigger axis tick labels
+           cex.title = 0.8,  # track titles
+           cex.main = 0.8,
+            sizes = c(0.25, 1, 1, 2, 2, 0.25))    # if you use main = "...")
+
+dev.off()
+```
+
+```{r neuro_vis_ADARB2_boxlot}
+neuro_dds_res_df_noage %>%
+  subset(padj_bacon < 0.05) %>%
+  arrange(padj_bacon) %>%
+  slice_head(n=1) %>%
+  dplyr::select("IGF136818":"IGF138589") %>%
+  pivot_longer(everything(),
+               names_to = "sample",
+               values_to = "counts") %>%
+  merge(., 
+        neuro_meta,
+        by = "sample") %>%
+  ggplot(aes(x=group,
+             y = counts, 
+             fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_fill_manual(values = c("#00326e", "#e1235c"))
+```
+
+```{r neuro_volcano}
+neuro_volcano <- ggplot(neuro_dds_res_df, 
+                        aes(x = lfc, 
+                            y = -log(pvalue_bacon),
+                            color = ifelse(padj_bacon < 0.05,"FDR<0.05", "FDR≥0.05"))) +
+  geom_point(alpha = 0.8,
+             size = 1) +
+  theme_bw() +
+  scale_color_manual(values = c("#e1235c", "#00326e"),
+                     name = "Significance") +
+  scale_y_continuous(name = "-log(unadjusted p-value)") +
+  scale_x_continuous(name = "log(fold-change)") +
+  theme(axis.text = element_text(size = 8),
+        axis.title = element_text(size = 10),
+        legend.title = element_text(size = 9),
+        legend.text = element_text(size = 8), 
+        legend.key.height = unit(0.25, "cm"),
+        legend.key.width = unit(0.25, "cm"),
+        legend.position = "bottom") +
+  ggrepel::geom_text_repel(data = neuro_dds_res_df %>% 
+                             arrange(padj_bacon) %>% 
+                             slice_head(n=10),
+                           aes(label = SYMBOL),
+                           max.overlaps = 100,
+                           box.padding = 0.4, 
+                           min.segment.length = unit(0, 'lines'),
+                           color = "black", 
+                           size = 2.5) 
+
+ggsave(neuro_volcano, 
+       filename = here("figures",
+                       "20251112_neuro_volcano_legend.png"),
+       height = 8, width = 8, units = "cm", dpi = 600)
+```
+
+
+```{r neuro_recap_rat_rotenone}
+# bcl 
+neuro_bcl <- neuro_dds_res_df %>% 
+  subset(SYMBOL == "BCL3") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., neuro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", nrow = 1) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(neuro_bcl, filename = here("figures", "20251014_neuro_bcl3.png"),
+       height = 5, width = 15, units = "cm", dpi = 600)
+
+# mat2b 
+neuro_mat2b <- neuro_dds_res_df %>% 
+  subset(SYMBOL == "MAT2B") %>%
+  subset(grepl("Distal Intergenic", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., neuro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(neuro_mat2b, filename = here("figures", "20251014_neuro_mat2b.png"),
+       height = 5, width = 5, units = "cm", dpi = 600)
+
+# hif3a 
+neuro_hif3a <- neuro_dds_res_df %>% 
+  subset(SYMBOL == "HIF3A") %>%
+  subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., neuro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y") +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+ggsave(neuro_hif3a, filename = here("figures", "20251014_neuro_hif3a.png"),
+       height = 5, width = 15, units = "cm", dpi = 600)
+
+# olfm4 
+neuro_olfm4 <- neuro_dds_res_df %>% 
+  subset(SYMBOL == "OLFM4") %>%
+  #subset(grepl("Promoter", annotation)) %>%
+  dplyr::select(c(chr, start, end, IGF136819:IGF138590)) %>%
+  pivot_longer(-c(chr,start,end), names_to = "sample", values_to = "counts") %>% 
+  merge(., neuro_meta, by = "sample") %>% 
+  mutate(name = paste0("chr", chr, ":", start, "-", end)) %>%
+  ggplot(aes(x = group, y = counts, fill = group)) +
+  geom_boxplot(alpha = 0.8) +
+  geom_point() +
+  facet_wrap(~name, scales = "free_y", nrow = 2) +
+  theme_bw() +
+  theme(axis.text = element_text(size = 8),
+        axis.title.y = element_text(size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none", 
+        strip.text = element_text(size = 6)) +
+  scale_fill_manual(values = c("#00326e", "#e1235c")) +
+  scale_y_continuous(name = "Counts") + 
+  scale_x_discrete(labels = c("Control", "PD"))
+
+
+ggsave(neuro_olfm4, filename = here("figures", "20251014_neuro_olfm4.png"),
+       height = 10, width = 25, units = "cm", dpi = 600)
+
+```
+
+```{r neuro_go_terms_hyper}
+# convert peaks to granges obj
+neuro_dds_res_df_hyper_gr <- GRanges(seqnames = neuro_dds_res_df_hyper$chr,
+                                     ranges   = IRanges(as.numeric(neuro_dds_res_df_hyper$start), 
+                                                        as.numeric(neuro_dds_res_df_hyper$end)),
+                                     strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(neuro_dds_res_df_hyper_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+neuro_dds_res_df_hyper_anno <- annotatePeak(neuro_dds_res_df_hyper_gr, 
+                                            TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                            tssRegion=c(-3000,3000), 
+                                            annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+neuro_dds_res_df_hyper <- merge(neuro_dds_res_df_hyper,
+                                as.data.frame(neuro_dds_res_df_hyper_anno@anno) %>%
+                                  mutate(chr = str_sub(seqnames, 4, 6)),
+                                by = c("chr", "start", "end"))
+
+neuro_hyper_genes <- unique(na.omit(as.data.frame(neuro_dds_res_df_hyper_anno)$ENSEMBL))
+
+neuro_hyper_go <- enrichGO(gene=neuro_hyper_genes, 
+                           OrgDb=org.Hs.eg.db, 
+                           keyType="ENSEMBL",
+                           ont="BP", 
+                           #pvalueCutoff=0.01, 
+                           qvalueCutoff=0.05)
+dotplot(neuro_hyper_go)
+```
+
+```{r neuro_go_terms_hypo}
+# convert peaks to granges obj
+neuro_dds_res_df_hypo_gr <- GRanges(seqnames = neuro_dds_res_df_hypo$chr,
+                                    ranges   = IRanges(as.numeric(neuro_dds_res_df_hypo$start), 
+                                                       as.numeric(neuro_dds_res_df_hypo$end)),
+                                    strand   = "*")
+
+# harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
+seqlevelsStyle(neuro_dds_res_df_hypo_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# annotate peaks
+neuro_dds_res_df_hypo_anno <- annotatePeak(neuro_dds_res_df_hypo_gr, 
+                                           TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                           tssRegion=c(-3000,3000), 
+                                           annoDb="org.Hs.eg.db")
+
+# merge annotate to res df
+neuro_dds_res_df_hypo <- merge(neuro_dds_res_df_hypo,
+                               as.data.frame(neuro_dds_res_df_hypo_anno@anno) %>%
+                                 mutate(chr = str_sub(seqnames, 4, 6)),
+                               by = c("chr", "start", "end"))
+
+neuro_hypo_genes <- unique(na.omit(as.data.frame(neuro_dds_res_df_hypo_anno)$ENSEMBL))
+
+neuro_hypo_go <- enrichGO(gene=neuro_hypo_genes, 
+                          OrgDb=org.Hs.eg.db, 
+                          keyType="ENSEMBL",
+                          ont="BP", 
+                          #pvalueCutoff=0.01, 
+                          qvalueCutoff=0.05)
+dotplot(neuro_hypo_go)
+```
+
 
 ### Comparison of peaks across cell types
 

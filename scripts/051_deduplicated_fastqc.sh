@@ -28,7 +28,7 @@ module load fastqc/0.12.1-gcc-13.2.0
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/050_deduplicated"
 
 # output directory for fastqc files
-OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/050_deduplicated/fastqc"
+OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/050_deduplicated/051_fastqc"
 
 mkdir -p ${OUT_DIR}
 

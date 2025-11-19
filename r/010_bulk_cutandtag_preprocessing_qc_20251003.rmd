@@ -22,8 +22,8 @@ library(tidyverse) # data wrangling
 library(plotly) # interactive plotting
 library(readxl) # read xls files
 library(DESeq2) # depth normalization + diff analysis
-library(pvca) # examine variance in pcs
-source(here("scripts","r","heat_scree_plot_corr.r"))
+#library(pvca) # examine variance in pcs
+source(here("r","heat_scree_plot_corr.r"))
 ```
 
 Read in participant metadata
@@ -414,18 +414,18 @@ ggplotly(celltype_plot)
 # annotate genes
 # convert peaks to granges obj
 features_all_gr <- GRanges(seqnames = features_all_clean$chr,
-                                     ranges   = IRanges(as.numeric(features_all_clean$start), 
-                                                        as.numeric(features_all_clean$end)),
-                                     strand   = "*")
+                           ranges   = IRanges(as.numeric(features_all_clean$start), 
+                                              as.numeric(features_all_clean$end)),
+                           strand   = "*")
 
 # harmonize chromosome naming style with TxDb (e.g., "chr1" vs "1")
 seqlevelsStyle(features_all_gr) <- seqlevelsStyle(TxDb.Hsapiens.UCSC.hg38.knownGene)
 
 # annotate peaks for samples
 features_all_anno <- annotatePeak(features_all_gr, 
-                                            TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
-                                            tssRegion=c(-3000,3000), 
-                                            annoDb="org.Hs.eg.db")
+                                  TxDb=TxDb.Hsapiens.UCSC.hg38.knownGene, 
+                                  tssRegion=c(-3000,3000), 
+                                  annoDb="org.Hs.eg.db")
 
 promoter_df <- subset(features_all_anno, grepl("Promoter", annotation))
 genes <- unique(na.omit(as.data.frame(promoter_df)$ENSEMBL))
@@ -629,136 +629,139 @@ heat_scree_plot(pc_neuron$x, pc_neuron_importance, 8, c(1:8), meta_categorical, 
 ```
 
 
+## Peak overlap with published datasets
 
+Read in peak data for samples.
+```{r peaks}
+micro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*microglia*", 
+                              full.names = TRUE)
 
+oligo_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*oligodendrocyte*", 
+                              full.names = TRUE)
 
-```{r scraps}
-## install.packages("BiocManager")
-## BiocManager::install(c("rtracklayer","GenomicRanges","EnrichedHeatmap",
-##                        "ComplexHeatmap","ChIPseeker",
-##                        "TxDb.Hsapiens.UCSC.hg38.knownGene","org.Hs.eg.db"))
+neuro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*neuron*", 
+                              full.names = TRUE)
 
-library(rtracklayer)
-library(GenomicRanges)
-library(EnrichedHeatmap)
-library(ComplexHeatmap)
-library(ChIPseeker)
-library(TxDb.Hsapiens.UCSC.hg38.knownGene)
-library(org.Hs.eg.db)
-
-# --------------------------
-# 1) Inputs
-# --------------------------
-# Cell-type bigWigs you already generated (RPGC-normalized is ideal)
-bw_files <- c(
-  "path/to/CellTypeA_merged_all_RPGC.bw",
-  "path/to/CellTypeB_merged_all_RPGC.bw",
-  "path/to/CellTypeC_merged_all_RPGC.bw"
-)
-cell_types <- gsub("_merged.*$", "", basename(bw_files))
-
-# Optional: peak set(s) to center on (BED/narrowPeak) — use union peaks or a CT-specific set
-peaks_bed <- "path/to/union_peaks.bed"  # or any peak set you want to visualize
-
-# --------------------------
-# 2) Define regions to visualize
-#    Option A: promoters/TSS windows (±2 kb) from TxDb
-# --------------------------
-txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
-promoters <- getPromoters(TxDb = txdb, upstream = 2000, downstream = 2000)
-
-#    Option B: peak-centered windows (±2 kb) and annotate with ChIPseeker
-peaks <- readPeakFile(peaks_bed)
-peakAnno <- annotatePeak(peaks, TxDb = txdb, annoDb = "org.Hs.eg.db")
-peak_windows <- suppressWarnings(
-  promoters(peakAnno@anno, upstream = 2000, downstream = 2000) # window around peak centers
+micro_feat <- purrr::imap_dfc(
+  micro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
 )
 
-# Pick one set of regions for the heatmap:
-regions <- promoters           # TSS-centered
-# regions <- peak_windows      # peak-centered
 
-# (Optional) Subset by annotation category, e.g., promoters only
-# prom_idx <- grepl("Promoter", as.data.frame(peakAnno@anno)$annotation)
-# regions <- peak_windows[prom_idx]
+oligo_feat <- purrr::imap_dfc(
+  oligo_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
 
-# --------------------------
-# 3) Import bigWigs and convert to matrices
-# --------------------------
-# normalizeToMatrix() bins signal around each region into a matrix
-# extend: half-window on each side (here 2 kb)
-# w: bin size in bp (here 50) → 4,000 / 50 = 80 columns
-extend_bp <- 2000
-bin_w     <- 50
+neuro_feat <- purrr::imap_dfc(
+  neuro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
 
-bw_rle_list <- lapply(bw_files, function(f) import(f, format = "bigWig", as = "RleList"))
+colnames(micro_feat) <- c("chr", "start", "end",
+                          sub("_microglia_multicov\\.tsv$", 
+                              "", 
+                              basename(micro_tsv_files)))
 
-mats <- lapply(bw_rle_list, function(bw_rle) {
-  normalizeToMatrix(bw_rle,
-                    target      = regions,
-                    extend      = extend_bp,
-                    w           = bin_w,
-                    background  = 0,
-                    smooth      = TRUE,
-                    mean_mode   = "w0")
-})
+colnames(oligo_feat) <- c("chr", "start", "end",
+                          sub("_oligodendrocytes_multicov\\.tsv$", 
+                              "", 
+                              basename(oligo_tsv_files)))
 
-# --------------------------
-# 4) Build heatmaps (+ average profiles) for each cell type
-# --------------------------
-# Common top annotation: mean profile line per heatmap
-top_anno <- HeatmapAnnotation(enriched = anno_enriched(yaxis = FALSE))
+colnames(neuro_feat) <- c("chr", "start", "end",
+                          sub("_neuron_multicov\\.tsv$", 
+                              "", 
+                              basename(neuro_tsv_files)))
 
-# Optional: order rows (regions) by the first matrix’s clustering or by max signal
-ord <- EnrichedHeatmap::get_order(EnrichedHeatmap(mats[[1]]))
+# remove low frip samples
+micro_feat_clean <- micro_feat %>%
+  dplyr::select(!"IGF136817")
 
-ht_list <- NULL
-for (i in seq_along(mats)) {
-  nm <- cell_types[i]
-  ht <- EnrichedHeatmap(mats[[i]],
-                        name = nm,
-                        top_annotation = top_anno,
-                        column_title = paste0(nm, " signal"),
-                        use_raster = TRUE) # faster for big matrices
-  ht_list <- if (is.null(ht_list)) ht else (ht_list + ht)
-}
+oligo_feat_clean <- oligo_feat %>%
+  dplyr::select(!"IGF136816")
 
-# Draw all side-by-side; apply consistent row order so bands align across tracks
-draw( ht_list, split = NULL, row_order = ord )
+neuro_feat_clean <- neuro_feat %>%
+  dplyr::select(!"IGF136815")
 
-# --------------------------
-# 5) Optional: z-score per region to compare shapes rather than magnitude
-# --------------------------
-zscore <- function(m) {
-  m2 <- t(scale(t(m)))     # center/scale each row (region)
-  m2[is.nan(m2)] <- 0
-  m2
-}
-mats_z <- lapply(mats, zscore)
+micro_gr <- GRanges(seqnames = micro_feat_clean$chr, 
+                    IRanges(start = micro_feat_clean$start,
+                            end = micro_feat_clean$end))
 
-ht_list_z <- NULL
-for (i in seq_along(mats_z)) {
-  nm <- paste0(cell_types[i], "_z")
-  ht <- EnrichedHeatmap(mats_z[[i]],
-                        name = nm,
-                        top_annotation = HeatmapAnnotation(enriched = anno_enriched(yaxis = FALSE)),
-                        column_title = paste0(cell_types[i], " (z-score)"),
-                        use_raster = TRUE)
-  ht_list_z <- if (is.null(ht_list_z)) ht else (ht_list_z + ht)
-}
-draw( ht_list_z, row_order = ord )
+oligo_gr <- GRanges(seqnames = oligo_feat_clean$chr, 
+                    IRanges(start = oligo_feat_clean$start,
+                            end = oligo_feat_clean$end))
 
-# --------------------------
-# 6) Save as PDF
-# --------------------------
-pdf("celltype_heatmaps.pdf", width = 10, height = 6)
-draw( ht_list, row_order = ord )
-dev.off()
 
-pdf("celltype_heatmaps_zscore.pdf", width = 10, height = 6)
-draw( ht_list_z, row_order = ord )
-dev.off()
+neuro_gr <- GRanges(seqnames = neuro_feat_clean$chr, 
+                    IRanges(start = neuro_feat_clean$start,
+                            end = neuro_feat_clean$end))
 
 
 
+seqlevelsStyle(micro_gr) <- "UCSC"
+seqlevelsStyle(oligo_gr) <- "UCSC"
+seqlevelsStyle(neuro_gr) <- "UCSC"
+```
+
+Load in data for previously published peak sets and convert GRanges obj. 
+```{r pub_data_in}
+# load nott astrocyte data
+nott_micro <- rtracklayer::import(here("resources",
+                                       "brain-cell-type-peak-files",
+                                       "H3K27ac",
+                                       "PU1_optimal_peak.H3K27.bed"))
+
+nott_oligo <- rtracklayer::import(here("resources",
+                                       "brain-cell-type-peak-files",
+                                       "H3K27ac",
+                                       "Olig2_optimal_peak.H3K27.bed"))
+
+nott_neuro <- rtracklayer::import(here("resources",
+                                       "brain-cell-type-peak-files",
+                                       "H3K27ac",
+                                       "NeuN_optimal_peak.H3K27.bed"))
+
+# set style to ucsc
+seqlevelsStyle(nott_micro) <- "UCSC"
+seqlevelsStyle(nott_oligo) <- "UCSC"
+seqlevelsStyle(nott_neuro) <- "UCSC"
+```
+
+Calculate overlap between peaks without duplicates and reference peaks. 
+```{r peaks_no_dup_overlap}
+# peak overlap with nott
+nott_micro_hits <- findOverlaps(micro_gr, 
+                                nott_micro, 
+                                ignore.strand = TRUE)
+
+micro_pct <- 100 * length(nott_micro_hits) / length(micro_gr)
+
+
+nott_oligo_hits <- findOverlaps(oligo_gr, 
+                                nott_oligo, 
+                                ignore.strand = TRUE)
+
+oligo_pct <- 100 * length(nott_oligo_hits) / length(oligo_gr)
+
+
+nott_neuro_hits <- findOverlaps(neuro_gr, 
+                                nott_neuro, 
+                                ignore.strand = TRUE)
+
+neuro_pct <- 100 * length(nott_neuro_hits) / length(neuro_gr)
 ```

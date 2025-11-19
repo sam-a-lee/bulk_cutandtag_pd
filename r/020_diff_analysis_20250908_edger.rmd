@@ -535,7 +535,7 @@ micro_design <- model.matrix(~ group + sex + pmi,
 micro_dgelist <- estimateDisp(micro_dgelist, 
                               micro_design, 
                               trend.method = "locfit.mixed",
-                              robust = F)
+                              robust = T)
 
 # plot biological coefficient of variation
 #plotBCV(micro_dgelist)
@@ -543,7 +543,7 @@ micro_dgelist <- estimateDisp(micro_dgelist,
 # fit quasi-likelihood GLM model
 micro_fit <- glmQLFit(micro_dgelist,
                       micro_design,
-                      robust = F)
+                      robust = T)
 
 # check MD plot - expect symmetry 
 # plotMD(glmQLFTest(micro_fit, coef="grouppd"))
@@ -568,7 +568,6 @@ mean_cpm <- rowMeans(cpm_norm, na.rm = TRUE)
 
 # create results df
 micro_res_df <- data.frame(
-  micro_peak_coords_clean,
   baseMean_like = mean_cpm,
   logFC = micro_tt$logFC,
   logCPM = micro_tt$logCPM,
@@ -577,6 +576,36 @@ micro_res_df <- data.frame(
   padj = micro_tt$FDR,
   row.names = rownames(micro_tt)
 )
+
+
+
+# bacon
+
+p <- micro_res_df$pvalue
+lfc <- micro_res_df$logFC
+
+# two-sided p -> |z|
+z_abs <- qnorm(p / 2, lower.tail = FALSE)
+
+# add direction from logFC
+z <- sign(lfc) * z_abs
+
+bc <- bacon(z)
+
+# Inspect bias & inflation
+bias(bc)       # estimated mean shift
+inflation(bc)  # > 1 means inflated, < 1 deflated
+
+z_cor  <- es(bc)       # bias + inflation corrected z-scores
+p_cor  <- pval(bc)     # corresponding corrected p-values
+
+tab$PValue.bacon <- p_cor
+tab$FDR.bacon    <- p.adjust(p_cor, method = "BH")
+
+
+bc <- bacon(micro_tt)
+micro_tt$padj_bacon <- pval(bc) %>% p.adjust(method = "BH")
+micro_tt$pvalue_bacon <- pval(bc)
 ```
 
 ```{r micro_qqplot}

@@ -8,20 +8,21 @@
 #SBATCH --job-name=merge_groups_bw
 #SBATCH --output=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/merge_bw_%A_%a.out
 #SBATCH --error=/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/logs/merge_bw_%A_%a.err
-# Tip: set the array after we know how many cell types exist, e.g. --array=0-<N-1>
+#SBATCH --array=0-2
 
 set -euo pipefail
 
 #---------#
 # purpose #
 #---------#
-# For each cell type (from metadata col3), merge BAMs within each group (col4: control/disease),
+# For each cell type (from metadata col3), merge BAMs within each group (col2: control / pd),
 # then create bigWig tracks from the merged BAMs using deepTools bamCoverage.
-# No DESeq2 size factors are used here.
+# Normalization is CPM (reads per million).
 
 #--------------------#
 # set up environment #
 #--------------------#
+
 CONDA_ROOT="/software/spackages_v0_21_prod/apps/linux-ubuntu22.04-zen2/gcc-13.2.0/anaconda3-2022.10-5wy43yh5crcsmws4afls5thwoskzarhe"
 if [ -f "${CONDA_ROOT}/etc/profile.d/conda.sh" ]; then
   . "${CONDA_ROOT}/etc/profile.d/conda.sh"
@@ -31,15 +32,17 @@ else
 fi
 
 conda activate deeptools
+module load samtools/1.17-gcc-13.2.0-python-3.11.6
 
 #--------------------#
 # user configuration #
 #--------------------#
-# Input filtered BAMs directory (files like <sample>_filtered_coordsorted.bam)
+
+# Input filtered BAMs directory
 IN_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/060_filtered"
 
-# Metadata (TSV): col1=sample, col3=cell_type, col4=group(control|disease). Header allowed.
-SAMPLE_META="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_vanderkant/data_out/080_differential_analysis/size_factors.tsv"
+# Metadata (TSV): col1=sample, col2=group, col3=celltype. Header allowed.
+SAMPLE_META="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/metadata/sample_metadata.tsv"
 
 # Output directory
 OUT_DIR="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/data_out/070_peaks/079_bigwigs_groups"
@@ -51,23 +54,19 @@ BLACKLIST="/scratch/prj/bcn_marzi_lab/analysis_cutandtag_pd_bulk/resources/nordi
 BINSIZE=25
 MIN_MAPQ=30
 THREADS="${SLURM_CPUS_PER_TASK:-1}"
-
-# Normalization for visualization of merged groups:
-# RPGC requires an effective genome size. For hg38:
-NORM="RPGC"
-EFFECTIVE_GENOME_SIZE=2913022398   # hg38 effective genome size
+NORM="CPM"   # deepTools normalization
 
 mkdir -p "${OUT_DIR}"
 
 #------------------------------#
 # collect BAMs and sample map  #
 #------------------------------#
-# Build a map from sample -> BAM path by matching prefix before first underscore.
+
 declare -A SAMPLE2BAM
+
 while IFS= read -r -d '' bam; do
   base="$(basename "$bam")"
-  # sample name is the prefix before the first underscore
-  sample="${base%%_*}"
+  sample="${base%%_*}"        # prefix before first underscore
   SAMPLE2BAM["$sample"]="$bam"
 done < <(find "${IN_DIR}" -maxdepth 1 -type f -name "*_filtered_coordsorted.bam" -print0 | sort -z)
 
@@ -79,14 +78,22 @@ fi
 #-------------------------#
 # parse metadata, get CTs #
 #-------------------------#
+
 if [[ ! -s "${SAMPLE_META}" ]]; then
   echo "Metadata TSV missing or empty: ${SAMPLE_META}" >&2
   exit 1
 fi
 
-# Get unique cell types (col3), ignore header and empty
+# Get unique cell types (col3), strip CR, skip header
 mapfile -t CELL_TYPES < <(
-  awk -F'\t' 'NR==1 && ($3 ~ /cell|Cell|CELL/) {next} {if($3!="") print $3}' "${SAMPLE_META}" | sort -u
+  awk -F'\t' '
+    NR==1 { next }               # skip header
+    {
+      ct=$3
+      gsub(/\r/, "", ct)         # remove Windows CRs
+      if (ct != "") print ct
+    }
+  ' "${SAMPLE_META}" | sort -u
 )
 
 if [[ ${#CELL_TYPES[@]} -eq 0 ]]; then
@@ -103,27 +110,43 @@ if (( IDX < 0 || IDX >= ${#CELL_TYPES[@]} )); then
 fi
 
 CELL_TYPE="${CELL_TYPES[$IDX]}"
-echo "[$(date)] Processing cell type: ${CELL_TYPE}"
+# extra safety: strip any CR/LF if they sneaked in
+CELL_TYPE="${CELL_TYPE//$'\r'/}"
+CELL_TYPE="${CELL_TYPE//$'\n'/}"
 
-#------------------------------#
-# gather sample lists per group#
-#------------------------------#
-# Get lists of samples for this cell type by group (col4)
+echo "[$(date)] Processing cell type: '${CELL_TYPE}'"
+
+#-------------------------------#
+# gather sample lists per group #
+#-------------------------------#
+
+# control samples for this cell type (group == 'control')
 mapfile -t CONTROL_SAMPLES < <(
   awk -F'\t' -v ct="${CELL_TYPE}" '
-    NR==1 && ($3 ~ /cell|Cell|CELL/ || $4 ~ /group|Group|GROUP/) {next}
-    tolower($3)==tolower(ct) && tolower($4) ~ /^control$/ {print $1}
+    NR==1 { next }  # skip header
+    {
+      g=$2; c=$3
+      gsub(/\r/, "", g)
+      gsub(/\r/, "", c)
+      if (tolower(c) == tolower(ct) && tolower(g) == "control") print $1
+    }
   ' "${SAMPLE_META}" | sort -u
 )
 
+# disease/pd samples for this cell type (group != 'control')
 mapfile -t DISEASE_SAMPLES < <(
   awk -F'\t' -v ct="${CELL_TYPE}" '
-    NR==1 && ($3 ~ /cell|Cell|CELL/ || $4 ~ /group|Group|GROUP/) {next}
-    tolower($3)==tolower(ct) && tolower($4) ~ /^disease$/ {print $1}
+    NR==1 { next }  # skip header
+    {
+      g=$2; c=$3
+      gsub(/\r/, "", g)
+      gsub(/\r/, "", c)
+      if (tolower(c) == tolower(ct) && tolower(g) != "control") print $1
+    }
   ' "${SAMPLE_META}" | sort -u
 )
 
-echo "Found ${#CONTROL_SAMPLES[@]} control and ${#DISEASE_SAMPLES[@]} disease samples for ${CELL_TYPE}"
+echo "Found ${#CONTROL_SAMPLES[@]} control and ${#DISEASE_SAMPLES[@]} disease/pd samples for ${CELL_TYPE}"
 
 # Turn sample lists into BAM lists (skip missing)
 gather_bams() {
@@ -136,21 +159,26 @@ gather_bams() {
       echo "WARNING: No BAM found for sample '${s}' (expected prefix match in ${IN_DIR})"
     fi
   done
-  printf '%s\0' "${out[@]}"  # NUL-separated for safety
+
+  # If there are any BAMs, print them NUL-separated; otherwise print nothing
+  if ((${#out[@]} > 0)); then
+    printf '%s\0' "${out[@]}"
+  fi
 }
 
 CONTROL_BAMS=()
 DISEASE_BAMS=()
-while IFS= read -r -d '' p; do CONTROL_BAMS+=("$p"); done < <(gather_bams CONTROL_SAMPLES)
-while IFS= read -r -d '' p; do DISEASE_BAMS+=("$p"); done < <(gather_bams DISEASE_SAMPLES)
+while IFS= read -r -d '' p; do CONTROL_BAMS+=("$p"); done < <(gather_bams CONTROL_SAMPLES || true)
+while IFS= read -r -d '' p; do DISEASE_BAMS+=("$p"); done < <(gather_bams DISEASE_SAMPLES || true)
 
 # Output subdir per cell type
 CT_OUT="${OUT_DIR}/${CELL_TYPE}"
 mkdir -p "${CT_OUT}"
 
-#------------------------------#
-# function: merge and bigwig   #
-#------------------------------#
+#----------------------------#
+# function: merge and bigwig #
+#----------------------------#
+
 merge_and_make_bw() {
   local label="$1"         # control or disease
   shift
@@ -170,12 +198,10 @@ merge_and_make_bw() {
     rm -f "${merged_bam}" "${merged_bam}.bai"
   fi
 
-  # samtools merge
   samtools merge -@ "${THREADS}" -f "${merged_bam}" "${bams[@]}"
   echo "Indexing ${merged_bam}"
   samtools index -@ "${THREADS}" "${merged_bam}"
 
-  # bamCoverage
   echo "Creating bigWig → ${merged_bw}"
   bamCoverage \
     --bam "${merged_bam}" \
@@ -183,7 +209,6 @@ merge_and_make_bw() {
     --outFileFormat bigwig \
     --binSize "${BINSIZE}" \
     --normalizeUsing "${NORM}" \
-    --effectiveGenomeSize "${EFFECTIVE_GENOME_SIZE}" \
     --numberOfProcessors "${THREADS}" \
     --minMappingQuality "${MIN_MAPQ}" \
     --ignoreDuplicates \

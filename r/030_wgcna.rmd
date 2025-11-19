@@ -1,0 +1,690 @@
+---
+title: "WGCNA"
+author: "Sam Lee"
+date: "2025-11-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Purpose
+
+Conduct WGNCA on bulk CUT&Tag data. Followed by annotation of gene modules (if any). Annotate to genes first (given small number of samples) vs perform directly on peaks then annotate.
+
+## Load data
+
+Load required libraries
+```{r libs}
+library(here) # dir calling 
+library(tidyverse) # tidy 
+library(GenomicRanges) # gr objects
+library(rtracklayer) # import and vis
+library(GenomicFeatures) # extract genomic info from txdb
+library(TxDb.Hsapiens.UCSC.hg38.knownGene) # human hg38 ucsc
+library(org.Hs.eg.db) # genome wide anno for human
+library(edgeR) # normalization
+library(WGCNA) # wgnca analysis
+library(limma) # diff analysis of modules 
+library(rGREAT) # comprehensive peak-gene assignment       
+```
+
+Load participant metadata
+```{r participant_meta}
+meta <- read.csv(here("resources",
+                      "metadata",
+                      "metadata_participants.csv")) %>%
+  mutate(group = ifelse(grepl("PDC", pid), "control", "pd")) %>%
+  mutate(sample = str_extract(sample, "IGF\\d+"))
+``` 
+
+Read in celltype-specific feature counts.
+```{r data_in_feature_counts}
+micro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*microglia*", 
+                              full.names = TRUE)
+
+oligo_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*oligodendrocyte*", 
+                              full.names = TRUE)
+
+neuro_tsv_files <- list.files(here("data_out",
+                                   "070_peaks",
+                                   "078_peaks_feature_counts_celltype"), 
+                              pattern = "*neuron*", 
+                              full.names = TRUE)
+
+micro_feat <- purrr::imap_dfc(
+  micro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+
+oligo_feat <- purrr::imap_dfc(
+  oligo_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+neuro_feat <- purrr::imap_dfc(
+  neuro_tsv_files,
+  ~ read_tsv(.x, show_col_types = FALSE, col_names = FALSE) %>% 
+    { if (.y == 1) dplyr::select(., 1:3, dplyr::last_col())
+      else          dplyr::select(., dplyr::last_col()) }
+)
+
+colnames(micro_feat) <- c("chr", "start", "end",
+                          sub("_microglia_multicov\\.tsv$", 
+                              "", 
+                              basename(micro_tsv_files)))
+
+colnames(oligo_feat) <- c("chr", "start", "end",
+                          sub("_oligodendrocytes_multicov\\.tsv$", 
+                              "", 
+                              basename(oligo_tsv_files)))
+
+colnames(neuro_feat) <- c("chr", "start", "end",
+                          sub("_neuron_multicov\\.tsv$", 
+                              "", 
+                              basename(neuro_tsv_files)))
+
+# remove low frip samples
+micro_feat_clean <- micro_feat %>%
+  dplyr::select(!"IGF136817")
+
+oligo_feat_clean <- oligo_feat %>%
+  dplyr::select(!"IGF136816")
+
+neuro_feat_clean <- neuro_feat %>%
+  dplyr::select(!"IGF136815")
+
+# remove uneeded files 
+rm(micro_tsv_files,
+   oligo_tsv_files,
+   neuro_tsv_files,
+   micro_feat,
+   oligo_feat,
+   neuro_feat)
+```
+
+Subset metadata for each cell type
+```{r meta_celltype}
+micro_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(micro_feat_clean))
+
+oligo_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(oligo_feat_clean))
+
+neuro_meta <- meta %>%
+  mutate(sample = str_extract(sample, "IGF\\d+")) %>%
+  subset(sample %in% colnames(neuro_feat_clean))
+```
+
+Read in results from differential analysis with DESeq2
+```{r diff_analysis_res}
+neuro_dds_res_df_noage <- read.csv(file = here("data_out",
+                                               "080_diff_analysis",
+                                               "20251112_neuro_deseq2_res.csv"))
+
+oligo_dds_res_df_noage <- read.csv(file = here("data_out",
+                                               "080_diff_analysis",
+                                               "20251112_oligo_deseq2_res.csv"))
+
+neuro_dds_res_df_noage <- read.csv(file = here("data_out",
+                                               "080_diff_analysis",
+                                               "20251112_neuro_deseq2_res.csv"))
+```
+
+## Get normalized counts for each cell type 
+
+```{r get_norm_counts}
+# helper function to apply across each cell type count df
+norm_counts <- function(features, meta){
+  
+  # get counts without peak loc
+  counts <- as.matrix(features[, -c(1:3)])
+  
+  # reorder cols to match samples
+  counts <- counts[, meta$sample, drop = FALSE]
+  
+  # ensure rownames for DESeq2 (use chr_start_end)
+  if (is.null(rownames(counts))) {
+    rownames(counts) <- apply(features[, 1:3], 1, paste, collapse = "_")
+  }
+  
+  # make colData rownames match sample names
+  meta2 <- meta
+  rownames(meta2) <- meta2$sample
+  
+  # build DESeq2 object and get VST
+  dds <- DESeqDataSetFromMatrix(countData = counts,
+                                colData   = meta2,
+                                design    = ~ 1)   # design not used for VST
+  
+  dds <- estimateSizeFactors(dds)
+  
+  vsd <- vst(dds, blind = TRUE)
+  vst_mat <- assay(vsd)   # peaks by samples
+  
+  # rebind with peak location (keep same column order as meta$sample)
+  vst_mat <- vst_mat[, meta$sample, drop = FALSE]
+  
+  cbind(features[, c(1:3)], as.data.frame(vst_mat))
+  
+  # # create edger DGElist obj and calc norm factors
+  # dge <- DGEList(counts = counts)
+  # dge <- calcNormFactors(dge, 
+  #                        method = "TMM")
+  # 
+  # # get cpm version 
+  # cpm <- cpm(dge, 
+  #            log = TRUE, 
+  #            prior.count = 1)  
+  # 
+  # # rebind with peak loc
+  # cbind(features[, c(1:3)], cpm)
+  # cpm <- apply(cpm, 2, function(v){ m<-mean(v,na.rm=TRUE); s<-sd(v,na.rm=TRUE); if(s==0) s<-1; (v-m)/s })
+}
+
+
+micro_feat_clean_cpm <- norm_counts(micro_feat_clean,
+                                    micro_meta)
+
+oligo_feat_clean_cpm <- norm_counts(oligo_feat_clean,
+                                    oligo_meta)
+
+neuro_feat_clean_cpm <- norm_counts(neuro_feat_clean,
+                                    neuro_meta)
+```
+
+## QC filtering of peaks
+
+```{r peak_filter}
+# helpful function to run on each cell types
+# wgcna_filter <- function(feature_mat){
+#   
+#   # keep peaks observed in ≥ min_present_samples
+#   min_present_samples = 5
+#   keep_present <- rowSums(feature_mat[,-c(1:3)] > 2) >= min_present_samples
+#   sum(keep_present)
+#   feature_mat <- feature_mat[keep_present, , drop = FALSE]
+#   
+#   # variance filter: keep top X% most variable peaks
+#   var_keep_quantile = 0 # keep eveyrthing above 
+#   vars <- apply(feature_mat[,-c(1:3)], 1, var, na.rm = TRUE)
+#   cut  <- as.numeric(quantile(vars, var_keep_quantile, na.rm = TRUE))
+#   feature_mat <- feature_mat[vars >= cut, , drop = FALSE]
+#   
+#   cat("[i] Peaks after filtering:", nrow(feature_mat), "\n")
+#   
+#   # put peaks in rownames and remove from mat
+#   rownames(feature_mat) <- paste0(feature_mat$chr, ":", 
+#                                   feature_mat$start, "-",
+#                                   feature_mat$end)
+#   
+#   # transpose for WGCNA: samples in rows, features in columns
+#   feature_mat_t <- t(feature_mat[,-c(1:3)])
+#   
+#   # optional: remove obvious outlier samples
+#   gsg <- goodSamplesGenes(feature_mat_t, 
+#                           minFraction = 0.5,
+#                           verbose = 3)
+#   if (!gsg$allOK) {
+#     feature_mat_t <- feature_mat_t[gsg$goodSamples, gsg$goodGenes]
+#   }
+#   
+#   feature_mat_t
+# }
+wgcna_filter <- function(feature_mat,
+                         min_present_samples = 5,  # absolute number now, like before
+                         min_expr = 5,             # same as your original (>2)
+                         var_keep_frac = 0.25) {   # keep top 10% most variable peaks
+  
+  message("[i] Starting with ", nrow(feature_mat), " peaks and ",
+          ncol(feature_mat) - 3, " samples.")
+  
+  # Extract expression matrix (assumes cols 1:3 are chr/start/end)
+  expr <- as.matrix(feature_mat[, -c(1:3)])
+  
+  # ---- 1) Presence filter ----
+  keep_present <- rowSums(expr > min_expr) >= min_present_samples
+  
+  message("[i] Peaks passing presence filter (expr >", min_expr, 
+          " in ≥ ", min_present_samples, " samples): ",
+          sum(keep_present))
+  
+  feature_mat <- feature_mat[keep_present, , drop = FALSE]
+  expr <- expr[keep_present, , drop = FALSE]
+  
+  if (nrow(feature_mat) == 0) {
+    stop("No peaks left after presence filtering.")
+  }
+  
+  # ---- 2) Variance filter: keep top 10% most variable peaks ----
+  vars <- apply(expr, 1, var, na.rm = TRUE)
+  
+  # quantile threshold for top 10%
+  q_cut <- as.numeric(quantile(vars, probs = 1 - var_keep_frac, na.rm = TRUE))
+  keep_var <- vars >= q_cut
+  
+  message("[i] Variance cutoff (top ", var_keep_frac*100, "%): ", q_cut)
+  message("[i] Peaks passing variance filter: ", sum(keep_var))
+  
+  feature_mat <- feature_mat[keep_var, , drop = FALSE]
+  expr <- expr[keep_var, , drop = FALSE]
+  
+  if (nrow(feature_mat) == 0) {
+    stop("No peaks left after variance filtering.")
+  }
+  
+  # ---- 3) Set rownames to peak coordinates ----
+  rownames(feature_mat) <- paste0(feature_mat$chr, ":",
+                                  feature_mat$start, "-",
+                                  feature_mat$end)
+  rownames(expr) <- rownames(feature_mat)
+  
+  # ---- 4) Transpose for WGCNA: samples in rows, peaks in columns ----
+  feature_mat_t <- t(expr)
+  
+  # ---- 5) Remove obvious outlier samples/genes (WGCNA QC) ----
+  gsg <- goodSamplesGenes(feature_mat_t,
+                          minFraction = 0.5,
+                          verbose = 3)
+  
+  if (!gsg$allOK) {
+    message("[i] Removing bad samples/genes detected by goodSamplesGenes")
+    feature_mat_t <- feature_mat_t[gsg$goodSamples, gsg$goodGenes, drop = FALSE]
+  }
+  
+  message("[i] Final dimensions for WGCNA: ",
+          nrow(feature_mat_t), " samples x ",
+          ncol(feature_mat_t), " peaks.")
+  
+  return(feature_mat_t)
+}
+
+micro_feat_wgcna <- wgcna_filter(micro_feat_clean_cpm)
+oligo_feat_wgcna <- wgcna_filter(oligo_feat_clean_cpm)
+neuro_feat_wgcna <- wgcna_filter(neuro_feat_clean_cpm)
+```
+
+## WGCNA microglia
+
+```{r micro_wgcna}
+# must requuest mult cores in slurm
+
+# enableWGCNAThreads(nThreads = max(1, parallel::detectCores() - 1))
+powers <- 1:20
+micro_sft <- pickSoftThreshold(micro_feat_wgcna, 
+                               powerVector = powers,
+                               networkType = "signed",
+                               corFnc = "bicor",
+                               verbose = 5)
+
+micro_softPower <- ifelse(is.na(micro_sft$powerEstimate), 6, micro_sft$powerEstimate)
+
+micro_net <- blockwiseModules(
+  micro_feat_wgcna,
+  randomSeed = 1234,
+  power = micro_softPower,
+  networkType = "signed",
+  corType = "bicor",
+  #minModuleSize = 100, 
+  deepSplit = 2, # half sensitive
+  mergeCutHeight = 0.25,
+  # reassignThreshold = 0,
+  pamRespectsDendro = FALSE,
+  saveTOMs = FALSE,
+  verbose = 3
+)
+
+# save(sft, net,
+#      file =  here("data_out",
+#                   "090_wgcna",
+#                   "micro_wgcna_all.rdata"))
+
+# ME  <- net$MEs; ME <- orderMEs(ME)
+# colnames(ME) <- gsub("^ME", "", colnames(ME))
+# modCols <- labels2colors(net$colors)
+# table(modCols)
+micro_modules <- micro_net$MEs
+```
+
+```{r micro_limma}
+# set rownames
+rownames(micro_meta) <- micro_meta$sample
+
+# design_mat
+micro_design <- model.matrix(~ 0 + group + sex + pmi_c, 
+                             data = micro_meta %>%
+                               mutate(pmi_c = scale(pmi, center = T, scale = F),
+                                      sex = factor(sex, levels = c("m", "f")),
+                                      group = as.character(group)
+                                      # group = factor(group, levels = c("control", "pd"))
+                               )) 
+
+micro_contrast_mat <- makeContrasts(pdvscontrol =  grouppd - groupcontrol, 
+                                    levels = micro_design)
+
+micro_fit <- lmFit(t(micro_modules), micro_design)             # transpose: features (MEs) × samples
+micro_fit2 <- contrasts.fit(micro_fit, micro_contrast_mat)
+micro_fit2 <- eBayes(micro_fit2)
+
+# 3) table of module-level effects
+micro_res <- topTable(micro_fit2, coef = "pdvscontrol", number = Inf)
+# tabME$Module <- rownames(tabME)           # ME names (e.g., MEblue)
+# tabME <- tabME[order(tabME$P.Value), ]
+# tabME[, c("Module", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val")]
+
+```
+
+
+Alternatively consider ABC - requires cmd line. 
+```{r rgreat}
+# get annotation across all micro peaks
+micro_background_gj <- submitGreatJob(micro_feat_clean_cpm[, c(1:3)], 
+                                      species = "hg38",
+                                      rule = "basalPlusExt",
+                                      adv_upstream = 50, 
+                                      adv_downstream = 50,
+                                      verbose = T)
+
+micro_background_rg <- getRegionGeneAssociations(micro_background_gj)  
+
+all_micro_genes <- unique(unlist(micro_background_rg$annotated_genes))
+
+# get annotation across peaks used in wgcna
+names(micro_net$colors[micro_net$colors == "blue"])
+
+df = data.frame(chr = names(micro_net$colors[micro_net$colors == "blue"]) %>% str_split_i(":", 1),
+                start = as.numeric(names(micro_net$colors[micro_net$colors == "blue"]) %>% str_split_i(":|-", 2)),
+                end = as.numeric(names(micro_net$colors[micro_net$colors == "blue"]) %>% str_split_i(":|-", 3)))
+
+micro_wgcna_gj <- submitGreatJob(df, 
+                                 species = "hg38",
+                                 rule = "basalPlusExt",
+                                 adv_upstream = 50, 
+                                 adv_downstream = 50,
+                                 verbose = T)
+
+micro_wcgna_rg <- getRegionGeneAssociations(micro_wgcna_gj)  
+
+all_micro_module_genes <- unique(unlist(micro_wcgna_rg$annotated_genes))
+
+
+
+micro_go <-  enrichGO(
+  gene          = all_micro_module_genes,
+  universe      = all_micro_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",   # adjust if using ENTREZID
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+
+head(as.data.frame(micro_go))
+
+
+
+# get annotation across peaks used in wgcna
+micro_grey60 = data.frame(chr = names(micro_net$colors[micro_net$colors == "grey60"]) %>% str_split_i(":", 1),
+                          start = as.numeric(names(micro_net$colors[micro_net$colors == "grey60"]) %>% str_split_i(":|-", 2)),
+                          end = as.numeric(names(micro_net$colors[micro_net$colors == "grey60"]) %>% str_split_i(":|-", 3)))
+
+micro_wgcna_grey60_gj <- submitGreatJob(micro_grey60, 
+                                 species = "hg38",
+                                 rule = "basalPlusExt",
+                                 adv_upstream = 50, 
+                                 adv_downstream = 50,
+                                 verbose = T)
+
+micro_wcgna_grey60_rg <- getRegionGeneAssociations(micro_wgcna_grey60_gj)  
+
+all_micro_module_grey60_genes <- unique(unlist(micro_wcgna_grey60_rg$annotated_genes))
+
+
+
+micro_grey60_go <-  enrichGO(
+  gene          = all_micro_module_grey60_genes,
+  universe      = all_micro_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",   # adjust if using ENTREZID
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.1,
+  readable      = TRUE
+)
+
+
+head(as.data.frame(micro_go))
+
+
+
+# get annotation across peaks used in wgcna
+micro_turquoise = data.frame(chr = names(micro_net$colors[micro_net$colors == "turquoise"]) %>% str_split_i(":", 1),
+                          start = as.numeric(names(micro_net$colors[micro_net$colors == "turquoise"]) %>% str_split_i(":|-", 2)),
+                          end = as.numeric(names(micro_net$colors[micro_net$colors == "turquoise"]) %>% str_split_i(":|-", 3)))
+
+micro_wgcna_turquoise_gj <- submitGreatJob(micro_turquoise, 
+                                 species = "hg38",
+                                 rule = "basalPlusExt",
+                                 adv_upstream = 50, 
+                                 adv_downstream = 50,
+                                 verbose = T)
+
+micro_wcgna_turquoise_rg <- getRegionGeneAssociations(micro_wgcna_turquoise_gj)  
+
+all_micro_module_turquoise_genes <- unique(unlist(micro_wcgna_turquoise_rg$annotated_genes))
+
+
+
+micro_turquoise_go <-  enrichGO(
+  gene          = all_micro_module_turquoise_genes,
+  universe      = all_micro_genes,
+  OrgDb         = org.Hs.eg.db,
+  keyType       = "SYMBOL",   # adjust if using ENTREZID
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  qvalueCutoff  = 0.1,
+  readable      = TRUE
+)
+
+
+head(as.data.frame(micro_turquoise_go))
+
+
+
+
+
+# Harmonize to our peak IDs:
+rg$peak_id <- paste0(seqnames(peaks)[rg$region_id], ":", start(peaks)[rg.region_id], "-", end(peaks)[rg.region_id])
+links_great <- data.table(gene_id = as.character(rg$geneId),
+                          peak_id = rg$peak_id)
+links_great[, symbol := AnnotationDbi::mapIds(orgdb, key=gene_id, keytype="ENTREZID",
+                                              column="SYMBOL", multiVals="first")]
+
+```
+
+
+
+
+## WGCNA oligodendrocytes
+
+```{r oligo_wgcna}
+# must requuest mult cores in slurm
+
+# enableWGCNAThreads(nThreads = max(1, parallel::detectCores() - 1))
+powers <- 1:20
+oligo_sft <- pickSoftThreshold(oligo_feat_wgcna, 
+                               powerVector = powers,
+                               networkType = "signed",
+                               corFnc = "bicor",
+                               verbose = 5)
+
+oligo_softPower <- ifelse(is.na(oligo_sft$powerEstimate), 6, oligo_sft$powerEstimate)
+
+oligo_net <- blockwiseModules(
+  oligo_feat_wgcna,
+  randomSeed = 1234,
+  power = oligo_softPower,
+  networkType = "signed",
+  corType = "bicor",
+  deepSplit = 2, # half sensitive
+  mergeCutHeight = 0.25,
+  # reassignThreshold = 0,
+  pamRespectsDendro = FALSE,
+  saveTOMs = FALSE,
+  verbose = 3
+)
+
+# save(sft, net,
+#      file =  here("data_out",
+#                   "090_wgcna",
+#                   "oligo_wgcna.rdata"))
+
+# ME  <- net$MEs; ME <- orderMEs(ME)
+# colnames(ME) <- gsub("^ME", "", colnames(ME))
+# modCols <- labels2colors(net$colors)
+# table(modCols)
+oligo_modules <- oligo_net$MEs
+```
+
+```{r oligo_limma}
+# set rownames
+rownames(oligo_meta) <- oligo_meta$sample
+
+# design_mat
+oligo_design <- model.matrix(~ 0 + group + sex + pmi_c, 
+                             data = oligo_meta %>%
+                               mutate(pmi_c = scale(pmi, center = T, scale = F),
+                                      sex = factor(sex, levels = c("m", "f")),
+                                      group = as.character(group)
+                                      # group = factor(group, levels = c("control", "pd"))
+                               )) 
+
+oligo_contrast.mat <- makeContrasts(pdvscontrol =  grouppd - groupcontrol, 
+                                    levels = oligo_design)
+
+oligo_fit <- lmFit(t(oligo_modules), oligo_design)             # transpose: features (MEs) × samples
+oligo_fit2 <- contrasts.fit(oligo_fit, oligo_contrast.mat)
+oligo_fit2 <- eBayes(oligo_fit2)
+
+# 3) table of module-level effects
+oligo_res <- topTable(oligo_fit2, coef = "pdvscontrol", number = Inf)
+# tabME$Module <- rownames(tabME)           # ME names (e.g., MEblue)
+# tabME <- tabME[order(tabME$P.Value), ]
+# tabME[, c("Module", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val")]
+
+```
+
+
+
+## WGCNA neurons
+
+```{r neuro_wgcna}
+# must requuest mult cores in slurm
+
+# enableWGCNAThreads(nThreads = max(1, parallel::detectCores() - 1))
+powers <- 1:20
+neuro_sft <- pickSoftThreshold(neuro_feat_wgcna, 
+                               powerVector = powers,
+                               networkType = "signed",
+                               corFnc = "bicor",
+                               verbose = 5)
+
+neuro_softPower <- ifelse(is.na(neuro_sft$powerEstimate), 6, neuro_sft$powerEstimate)
+
+neuro_net <- blockwiseModules(
+  oligo_feat_wgcna,
+  randomSeed = 1234,
+  power = neuro_softPower,
+  networkType = "signed",
+  corType = "bicor",
+  deepSplit = 2, # half sensitive
+  mergeCutHeight = 0.25,
+  # reassignThreshold = 0,
+  pamRespectsDendro = FALSE,
+  saveTOMs = FALSE,
+  verbose = 3
+)
+
+# save(sft, net,
+#      file =  here("data_out",
+#                   "090_wgcna",
+#                   "neuro_wgcna.rdata"))
+
+# ME  <- net$MEs; ME <- orderMEs(ME)
+# colnames(ME) <- gsub("^ME", "", colnames(ME))
+# modCols <- labels2colors(net$colors)
+# table(modCols)
+neuro_modules <- neuro_net$MEs
+```
+
+```{r neuro_limma}
+# set rownames
+rownames(neuro_meta) <- neuro_meta$sample
+
+# design_mat
+neuro_design <- model.matrix(~ 0 + group + sex + pmi_c, 
+                             data = neuro_meta %>%
+                               mutate(pmi_c = scale(pmi, center = T, scale = F),
+                                      sex = factor(sex, levels = c("m", "f")),
+                                      group = as.character(group)
+                                      # group = factor(group, levels = c("control", "pd"))
+                               )) 
+
+neuro_contrast.mat <- makeContrasts(pdvscontrol =  grouppd - groupcontrol, 
+                                    levels = neuro_design)
+
+neuro_fit <- lmFit(t(neuro_modules), neuro_design)             # transpose: features (MEs) × samples
+neuro_fit2 <- contrasts.fit(neuro_fit, neuro_contrast.mat)
+neuro_fit2 <- eBayes(neuro_fit2)
+
+# 3) table of module-level effects
+neuro_res <- topTable(neuro_fit2, coef = "pdvscontrol", number = Inf)
+# tabME$Module <- rownames(tabME)           # ME names (e.g., MEblue)
+# tabME <- tabME[order(tabME$P.Value), ]
+# tabME[, c("Module", "logFC", "AveExpr", "t", "P.Value", "adj.P.Val")]
+
+```
+
+
+
+
+## Get peak-gene linkage with rGREAT
+
+Alternatively consider ABC - requires cmd line. 
+```{r rgreat}
+gj <- submitGreatJob(micro_feat_clean_cpm[, c(1:3)], 
+                     species = "hg38",
+                     rule = "basalPlusExt",
+                     adv_upstream = 50, 
+                     adv_downstream = 50,
+                     verbose = T)
+
+rg <- getRegionGeneAssociations(gj)  # data.frame with region (peak) ↔ gene
+
+
+# Harmonize to our peak IDs:
+rg$peak_id <- paste0(seqnames(peaks)[rg$region_id], ":", start(peaks)[rg.region_id], "-", end(peaks)[rg.region_id])
+links_great <- data.table(gene_id = as.character(rg$geneId),
+                          peak_id = rg$peak_id)
+links_great[, symbol := AnnotationDbi::mapIds(orgdb, key=gene_id, keytype="ENTREZID",
+                                              column="SYMBOL", multiVals="first")]
+
+```
+
